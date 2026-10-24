@@ -12,6 +12,7 @@ import {
   SyncAndCrossPlatformView,
 } from './components/HabitsAndSyncViews';
 import { BatchFileImporterModal } from './components/BatchFileImporterModal';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 export default function App() {
@@ -24,11 +25,24 @@ export default function App() {
   const closeActiveBook = useLuminaStore((s) => s.closeActiveBook);
 
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const palette = READING_THEMES[theme] || READING_THEMES.paper;
 
   useEffect(() => {
     hydrateApp();
   }, [hydrateApp]);
+
+  // Global Cmd+K / Ctrl+K Command Palette & Syntopicon Search Shortcut
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // Global Drag-and-Drop File Ingestion
   useEffect(() => {
@@ -104,7 +118,7 @@ export default function App() {
           <UnifiedReaderView />
         ) : (
           <>
-            <TopNavHeader />
+            <TopNavHeader onOpenCommandPalette={() => setIsCommandPaletteOpen(true)} />
             <main className="flex-1 pb-20 md:pb-0">
               {activeTab === 'library' && <LibrarySanctuaryView />}
               {activeTab === 'notebook' && <NotebookWorkspaceView />}
@@ -117,6 +131,11 @@ export default function App() {
       </ErrorBoundary>
 
       <BatchFileImporterModal />
+      <CommandPaletteModal
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+      />
     </div>
   );
 }
+

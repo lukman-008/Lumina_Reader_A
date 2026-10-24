@@ -310,9 +310,12 @@ async function parseAndStoreEpub(
 
       const rawBuf = await zipEntry.async('arraybuffer');
       const htmlStr = decodeTextBufferSafely(rawBuf);
-      const extracted = extractSemanticParagraphsFromHtml(
+      const entryDir = href.includes('/') ? href.slice(0, href.lastIndexOf('/') + 1) : '';
+      const extracted = await extractSemanticParagraphsFromHtml(
         htmlStr,
-        `${title} — ${rawChapters.length + 1}`
+        `${title} — ${rawChapters.length + 1}`,
+        zip,
+        entryDir
       );
       if (extracted.paragraphs.length > 0) {
         rawChapters.push(extracted);
@@ -563,35 +566,95 @@ function resolveRelativePath(baseDir: string, relativeHref: string): string {
   return stack.join('/');
 }
 
-function extractSemanticParagraphsFromHtml(
+async function extractSemanticParagraphsFromHtml(
   html: string,
-  fallbackTitle: string
-): { title: string; paragraphs: string[] } {
+  fallbackTitle: string,
+  zip?: JSZip,
+  baseDir = ''
+): Promise<{ title: string; paragraphs: string[] }> {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
-  doc.querySelectorAll('script, style, nav, svg, noscript').forEach((el) => el.remove());
+  doc.querySelectorAll('script, style, nav, noscript').forEach((el) => el.remove());
 
   const headingEl = doc.querySelector('h1, h2, h3, title');
   const title = headingEl?.textContent?.replace(/\s+/g, ' ').trim() || fallbackTitle;
 
   const blockElements = Array.from(
-    doc.querySelectorAll('p, div, blockquote, li, h1, h2, h3, h4, pre, article, section')
+    doc.querySelectorAll(
+      'p, div, blockquote, li, h1, h2, h3, h4, pre, table, img, image, figure, article, section'
+    )
   );
   const paragraphs: string[] = [];
 
-  if (blockElements.length > 0) {
-    blockElements.forEach((el) => {
-      if (
-        (el.tagName === 'DIV' || el.tagName === 'SECTION' || el.tagName === 'ARTICLE') &&
-        el.querySelector('p, div, blockquote, h1, h2, h3')
-      ) {
-        return;
+  for (const el of blockElements) {
+    const tag = el.tagName.toUpperCase();
+    // Extract embedded images / figures from EPUB ZIP archive or inline URLs
+    if (tag === 'IMG' || tag === 'IMAGE') {
+      const rawSrc =
+        el.getAttribute('src') ||
+        el.getAttribute('href') ||
+        el.getAttribute('xlink:href') ||
+        '';
+      const altText = el.getAttribute('alt') || el.getAttribute('title') || 'Figure';
+      if (rawSrc) {
+        if (rawSrc.startsWith('data:image/') || rawSrc.startsWith('http')) {
+          paragraphs.push(`[IMAGE_DATA:${rawSrc}|${altText}]`);
+        } else if (zip) {
+          const cleanRel = rawSrc.split('#')[0];
+          const resolvedImgPath = resolveRelativePath(baseDir, cleanRel);
+          const imgEntry =
+            zip.file(resolvedImgPath) ||
+            Object.keys(zip.files)
+              .map((k) => (k.endsWith('/' + cleanRel) || k === cleanRel ? zip.file(k) : null))
+              .find(Boolean);
+          if (imgEntry) {
+            try {
+              const b64 = await imgEntry.async('base64');
+              const ext = (resolvedImgPath.split('.').pop() || 'png').toLowerCase();
+              const mime =
+                ext === 'jpg' || ext === 'jpeg'
+                  ? 'image/jpeg'
+                  : ext === 'webp'
+                  ? 'image/webp'
+                  : ext === 'svg'
+                  ? 'image/svg+xml'
+                  : 'image/png';
+              paragraphs.push(`[IMAGE_DATA:data:${mime};base64,${b64}|${altText}]`);
+            } catch {
+              // ignore unreadable image
+            }
+          }
+        }
       }
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length >= 2 && paragraphs[paragraphs.length - 1] !== text) {
-        paragraphs.push(text);
+      continue;
+    }
+
+    if (tag === 'TABLE') {
+      const rows = Array.from(el.querySelectorAll('tr'))
+        .map((tr) =>
+          Array.from(tr.querySelectorAll('th, td'))
+            .map((cell) => (cell.textContent || '').replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .join('  │  ')
+        )
+        .filter(Boolean);
+      if (rows.length > 0) {
+        paragraphs.push(rows.join('\n'));
       }
-    });
+      continue;
+    }
+
+    if (
+      (tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'FIGURE') &&
+      el.querySelector('p, div, blockquote, h1, h2, h3, img, table')
+    ) {
+      continue;
+    }
+
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length >= 2 && paragraphs[paragraphs.length - 1] !== text) {
+      paragraphs.push(text);
+    }
   }
 
   if (paragraphs.length === 0) {
@@ -604,6 +667,85 @@ function extractSemanticParagraphsFromHtml(
   }
 
   return { title, paragraphs };
+}
+
+/**
+ * Reader-Mode Clipper: Converts pasted web articles, essays, or HTML snippets into a structured Volume.
+ */
+export async function ingestWebArticleClip(params: {
+  title: string;
+  author?: string;
+  sourceUrl?: string;
+  rawContent: string;
+}): Promise<BookMeta> {
+  const bookId = `clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const coverGradient = COVER_GRADIENTS[Math.floor(Math.random() * COVER_GRADIENTS.length)];
+  const raw = sanitizeAndRepairUnicodeText(params.rawContent || '').trim();
+  const isHtml = /<\/?(p|div|article|h1|h2|blockquote|section|br)\b/i.test(raw);
+
+  let chapters: BookChapter[] = [];
+  if (isHtml) {
+    const extracted = await extractSemanticParagraphsFromHtml(raw, params.title || 'Web Article');
+    const content = extracted.paragraphs.join('\n\n');
+    const wordCount = Math.max(1, content.split(/\s+/).filter(Boolean).length);
+    chapters = [
+      {
+        id: 'ch-1',
+        title: extracted.title || params.title || 'Web Article',
+        content,
+        paragraphs: extracted.paragraphs,
+        wordCount,
+        startLocation: 1,
+        endLocation: Math.max(2, Math.ceil(content.length / 150)),
+      },
+    ];
+  } else {
+    chapters = splitTextIntoChapters(raw, params.title || 'Clipped Essay');
+  }
+
+  const totalWords = Math.max(1, chapters.reduce((acc, c) => acc + c.wordCount, 0));
+  const totalLocations = Math.max(1, chapters[chapters.length - 1]?.endLocation || 1);
+  const cleanTitle = (params.title || chapters[0]?.title || 'Clipped Web Essay').trim();
+  const cleanAuthor = (params.author || (params.sourceUrl ? new URL(params.sourceUrl, 'https://example.com').hostname : 'Web Reader Clipper')).trim();
+
+  const meta: BookMeta = {
+    id: bookId,
+    title: cleanTitle,
+    author: cleanAuthor,
+    description:
+      (chapters[0]?.paragraphs?.[0] || raw).replace(/\[IMAGE_DATA:[^\]]+\]/g, '').slice(0, 220) ||
+      'Clipped essay formatted for distraction-free reading.',
+    format: 'md',
+    coverGradient,
+    category: 'Web Articles & Essays',
+    totalWords,
+    totalLocations,
+    chapterCount: chapters.length,
+    addedAt: Date.now(),
+    locator: {
+      chapterIndex: 0,
+      pageIndex: 0,
+      paragraphIndex: 0,
+      charOffset: 0,
+      locationNumber: 1,
+      percentage: 1,
+      lastReadTimestamp: Date.now(),
+    },
+  };
+
+  const contentRecord: BookContentRecord = {
+    bookId,
+    chapters,
+    toc: chapters.map((c, idx) => ({ id: c.id, title: c.title, chapterIndex: idx, level: 0 })),
+    xray: buildLocalXRayIndex(bookId, chapters),
+  };
+
+  await db.transaction('rw', db.booksMeta, db.bookContents, async () => {
+    await db.booksMeta.put(meta);
+    await db.bookContents.put(contentRecord);
+  });
+
+  return meta;
 }
 
 function splitTextIntoChapters(fullText: string, defaultTitle: string): BookChapter[] {

@@ -912,3 +912,33 @@ export async function lookupMultilingualWord(
     source: 'local-lexicon',
   };
 }
+
+/**
+ * Synchronous 0ms lookup for Live Word Wise Interlinear Hints in the Reader.
+ * Returns a concise 2-5 word gloss if the word (or its stem) exists in the curated lexicon.
+ */
+export function getQuickWordWiseHint(rawWord: string): string | null {
+  const cleaned = sanitizeAndRepairUnicodeText(rawWord || '')
+    .replace(/^[^\p{L}\p{M}]+|[^\p{L}\p{M}]+$/gu, '')
+    .trim();
+  if (cleaned.length < 3) return null;
+  const lower = cleaned.toLowerCase();
+  const direct = MULTILINGUAL_LEXICON[lower] || MULTILINGUAL_LEXICON[cleaned] || lookupCache.get(lower);
+  if (direct) {
+    return direct.definition.split(/[.;\n(]/)[0].slice(0, 44).trim();
+  }
+  const script = detectWordScript(cleaned);
+  if (script === 'devanagari') {
+    const { stem } = stemHindiWord(cleaned);
+    if (MULTILINGUAL_LEXICON[stem]) {
+      return MULTILINGUAL_LEXICON[stem].definition.split(/[.;\n(]/)[0].slice(0, 44).trim();
+    }
+  } else if (script === 'arabic') {
+    const { stem } = stemArabicWord(cleaned);
+    if (MULTILINGUAL_LEXICON[stem]) {
+      return MULTILINGUAL_LEXICON[stem].definition.split(/[.;\n(]/)[0].slice(0, 44).trim();
+    }
+  }
+  return null;
+}
+

@@ -148,6 +148,7 @@ export interface Highlight {
   color: HighlightColor;
   note?: string;
   tags?: string[];
+  imageSnippetDataUrl?: string; // Cropped figure/diagram snapshot from PDF canvas
   rects?: HighlightRect[]; // Normalized % rects for PDF canvas overlays
   createdAt: number;
 }
@@ -194,6 +195,7 @@ export interface ReaderSettings {
   layoutMode: LayoutMode;
   textAlign: TextAlignment;
   bionicReading: boolean;
+  liveWordWiseHints?: boolean;
   readingRuler: boolean;
   readingRulerHeight: number;
   readingRulerOpacity: number;
@@ -202,6 +204,7 @@ export interface ReaderSettings {
   pageTurnAnimation?: 'slide' | 'curl' | 'instant';
   pdfThemeFilter?: boolean;
   pdfAutoCropMargins?: boolean;
+  pdfSpreadMode?: 'single' | 'spread';
   dailyGoalMinutes?: number;
   yearlyBookGoal?: number;
   warmth: number;

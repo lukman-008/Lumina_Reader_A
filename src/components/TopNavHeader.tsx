@@ -6,6 +6,7 @@ import {
   Languages,
   BarChart3,
   Cloud,
+  Search,
 } from 'lucide-react';
 import { useLuminaStore } from '../store/useLuminaStore';
 import { READING_THEMES } from '../utils/themeTokens';
@@ -23,7 +24,11 @@ const NAV_ITEMS: {
   { id: 'sync', label: 'Devices', icon: Cloud },
 ];
 
-export const TopNavHeader: React.FC = () => {
+interface TopNavHeaderProps {
+  onOpenCommandPalette?: () => void;
+}
+
+export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette }) => {
   const activeTab = useLuminaStore((s) => s.activeTab);
   const setActiveTab = useLuminaStore((s) => s.setActiveTab);
   const setImporterOpen = useLuminaStore((s) => s.setImporterOpen);
@@ -69,8 +74,23 @@ export const TopNavHeader: React.FC = () => {
           })}
         </nav>
 
-        {/* Zone 3: Primary Import Action */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: Syntopicon Search (Cmd+K) & Primary Import Action */}
+        <div className="flex items-center gap-2 shrink-0">
+          {onOpenCommandPalette && (
+            <button
+              type="button"
+              onClick={onOpenCommandPalette}
+              title="Global Syntopicon Search & Command Palette (Cmd+K / Ctrl+K)"
+              className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors ${palette.elevatedBg} ${palette.borderHairline} ${palette.textSecondary}`}
+            >
+              <Search className="w-3.5 h-3.5 text-amber-500" />
+              <span className="hidden sm:inline">Syntopicon Search</span>
+              <kbd className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-mono-reader rounded border border-current/20 opacity-75">
+                ⌘K
+              </kbd>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setImporterOpen(true)}

@@ -353,7 +353,12 @@ export const useLuminaStore = create<LuminaState>((set, get) => ({
         locator: sanitizeLocator(meta.locator, meta.totalLocations),
       };
 
-      set({ isLoadingBookContent: true, activeBookMeta: safeMeta, locationHistoryStack: [] });
+      set({
+        isLoadingBookContent: true,
+        activeBookMeta: safeMeta,
+        isZenMode: false,
+        locationHistoryStack: [],
+      });
 
       let content = await db.bookContents.get(bookId);
       if (!content) {
@@ -386,6 +391,7 @@ export const useLuminaStore = create<LuminaState>((set, get) => ({
           activeBookMeta: updatedMeta,
           activeBookContent: content || null,
           isLoadingBookContent: false,
+          isZenMode: false,
           activeJumpTarget: {
             highlightId: jumpToLocation.highlightId,
             searchText: jumpToLocation.searchText,
@@ -402,6 +408,7 @@ export const useLuminaStore = create<LuminaState>((set, get) => ({
           activeBookMeta: safeMeta,
           activeBookContent: content || null,
           isLoadingBookContent: false,
+          isZenMode: false,
           activeJumpTarget: null,
         });
       }

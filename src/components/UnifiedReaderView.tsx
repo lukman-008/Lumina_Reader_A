@@ -39,6 +39,7 @@ import {
   lookupWordWise,
   isRtlText,
 } from '../services/localIntelligenceEngine';
+import { getQuickWordWiseHint } from '../services/multilingualDictionary';
 import { ttsService } from '../services/ttsService';
 import { VirtualizedPdfEngine, cleanExtractedText } from './VirtualizedPdfEngine';
 import { QuoteCardModal } from './QuoteCardModal';
@@ -58,6 +59,8 @@ export const UnifiedReaderView: React.FC = () => {
   const settings = useLuminaStore((s) => s.settings);
   const highlights = useLuminaStore((s) => s.highlights);
   const bookmarks = useLuminaStore((s) => s.bookmarks);
+  const vocabulary = useLuminaStore((s) => s.vocabulary);
+  const readingSessions = useLuminaStore((s) => s.readingSessions);
   const isZenMode = useLuminaStore((s) => s.isZenMode);
   const locationHistoryStack = useLuminaStore((s) => s.locationHistoryStack);
   const activeJumpTarget = useLuminaStore((s) => s.activeJumpTarget);
@@ -96,7 +99,7 @@ export const UnifiedReaderView: React.FC = () => {
   // Page-Turn Animation State ('next' | 'prev' | null)
   const [pageTurnDirection, setPageTurnDirection] = useState<'next' | 'prev' | null>(null);
 
-  // Mobile/Tablet Touch Gestures (Swipe-to-Turn-Page & Pinch-to-Scale Font)
+  // Mobile/Tablet Touch Gestures (Swipe-to-Turn-Page, Left-Edge Warmth Swipe & Pinch-to-Scale Font)
   const [swipeDeltaX, setSwipeDeltaX] = useState(0);
   const [fontScaleHud, setFontScaleHud] = useState<string | null>(null);
   const touchGestureRef = useRef<{
@@ -106,6 +109,8 @@ export const UnifiedReaderView: React.FC = () => {
     isPinch: boolean;
     initialPinchDist: number;
     initialFontSize: number;
+    isLeftEdgeWarmthSwipe?: boolean;
+    initialWarmth?: number;
   } | null>(null);
   const hudTimeoutRef = useRef<number | null>(null);
   const customFontInputRef = useRef<HTMLInputElement | null>(null);
@@ -115,8 +120,17 @@ export const UnifiedReaderView: React.FC = () => {
   const [selectedParaIdx, setSelectedParaIdx] = useState<number>(0);
   const [selectedPdfPage, setSelectedPdfPage] = useState<number | null>(null);
   const [selectedPdfRects, setSelectedPdfRects] = useState<HighlightRect[] | undefined>(undefined);
+  const [selectedPdfImageSnippet, setSelectedPdfImageSnippet] = useState<string | undefined>(
+    undefined
+  );
   const [marginNoteDraft, setMarginNoteDraft] = useState('');
   const [showNoteInput, setShowNoteInput] = useState(false);
+
+  // Full-Screen Archival Figure Lightbox Modal State
+  const [lightboxImage, setLightboxImage] = useState<{
+    src: string;
+    caption: string;
+  } | null>(null);
 
   const [quoteCardModalData, setQuoteCardModalData] = useState<{
     quoteText: string;
@@ -304,6 +318,27 @@ export const UnifiedReaderView: React.FC = () => {
     return source.split(/\s+/).filter(Boolean);
   }, [selectedText, currentChapter.content]);
 
+  // Personalized Live Reading Speed (WPM) & Time-Left-in-Chapter Estimator
+  const personalizedReadingStats = useMemo(() => {
+    const totalWordsRead = readingSessions.reduce((acc, s) => acc + (s.wordsRead || 0), 0);
+    const totalMinsRead = readingSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+    const userWpm =
+      totalMinsRead >= 2
+        ? Math.min(450, Math.max(150, Math.round(totalWordsRead / totalMinsRead)))
+        : 235;
+    const chapterTotalWords = Math.max(
+      60,
+      currentChapter.wordCount || (currentChapter.content || '').split(/\s+/).length
+    );
+    const remainingRatio = Math.max(
+      0.04,
+      (totalPagesInChapter - currentPageIndex) / Math.max(1, totalPagesInChapter)
+    );
+    const remainingWords = Math.round(chapterTotalWords * remainingRatio);
+    const minsLeftInChapter = Math.max(1, Math.round(remainingWords / userWpm));
+    return { userWpm, minsLeftInChapter };
+  }, [readingSessions, currentChapter.wordCount, currentChapter.content, totalPagesInChapter, currentPageIndex]);
+
   // Instant In-Book & In-PDF Full-Text Search Across Chapters & Indexed PDF Pages
   const inBookSearchResults = useMemo(() => {
     const q = inBookSearchQuery.trim().toLowerCase();
@@ -389,6 +424,14 @@ export const UnifiedReaderView: React.FC = () => {
         ? settings.customFontName || 'Custom Font'
         : FONT_FAMILY_CLASSES[settings.fontFamily]?.label || 'Literata';
     setFontScaleHud(`${newSize}px · ${fontLabel}`);
+    if (hudTimeoutRef.current) window.clearTimeout(hudTimeoutRef.current);
+    hudTimeoutRef.current = window.setTimeout(() => {
+      setFontScaleHud(null);
+    }, 950);
+  };
+
+  const triggerCustomHud = (message: string) => {
+    setFontScaleHud(message);
     if (hudTimeoutRef.current) window.clearTimeout(hudTimeoutRef.current);
     hudTimeoutRef.current = window.setTimeout(() => {
       setFontScaleHud(null);
@@ -515,6 +558,10 @@ export const UnifiedReaderView: React.FC = () => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (lightboxImage) {
+          setLightboxImage(null);
+          return;
+        }
         if (quoteCardModalData) {
           setQuoteCardModalData(null);
           return;
@@ -785,10 +832,12 @@ export const UnifiedReaderView: React.FC = () => {
       color,
       note: note?.trim() || undefined,
       rects: isPdf ? selectedPdfRects : undefined,
+      imageSnippetDataUrl: isPdf ? selectedPdfImageSnippet : undefined,
     });
     setSelectedText('');
     setSelectedPdfPage(null);
     setSelectedPdfRects(undefined);
+    setSelectedPdfImageSnippet(undefined);
     setMarginNoteDraft('');
     setShowNoteInput(false);
     window.getSelection()?.removeAllRanges();
@@ -992,6 +1041,43 @@ export const UnifiedReaderView: React.FC = () => {
       });
 
       return <>{nodes}</>;
+    }
+
+    if (settings.liveWordWiseHints) {
+      let hintsInPara = 0;
+      return text.split(/(\s+)/).map((token, tIdx) => {
+        if (/^\s+$/.test(token)) return token;
+        const cleanTok = token.replace(/^[^\p{L}\p{M}]+|[^\p{L}\p{M}]+$/gu, '');
+        if (cleanTok.length >= 4 && hintsInPara < 5) {
+          const vocabMatch = vocabulary.find(
+            (v) => v.word.toLowerCase() === cleanTok.toLowerCase()
+          );
+          const hint =
+            (vocabMatch
+              ? vocabMatch.definition.split(/[.;\n(]/)[0].slice(0, 42).trim()
+              : null) || getQuickWordWiseHint(cleanTok);
+          if (hint) {
+            hintsInPara++;
+            return (
+              <ruby
+                key={`ww-${paraIndex}-${tIdx}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleWordLookup(cleanTok, text);
+                }}
+                title={`${cleanTok}: ${hint} (Click for full Word Wise card)`}
+                className="cursor-pointer border-b border-dotted border-amber-500/75 hover:bg-amber-500/10 rounded-xs px-0.5 transition-colors"
+              >
+                {token}
+                <rt className="text-[9px] font-sans font-medium text-amber-700 dark:text-amber-400 select-none tracking-normal px-0.5">
+                  {hint}
+                </rt>
+              </ruby>
+            );
+          }
+        }
+        return token;
+      });
     }
 
     if (settings.bionicReading && !isRtlText(text)) {
@@ -1236,6 +1322,19 @@ export const UnifiedReaderView: React.FC = () => {
                         />
                       </div>
                       <p className="font-literata italic leading-relaxed">"{hl.selectedText}"</p>
+                      {hl.imageSnippetDataUrl && (
+                        <img
+                          src={hl.imageSnippetDataUrl}
+                          alt="Cropped PDF Figure Excerpt"
+                          onClick={() =>
+                            setLightboxImage({
+                              src: hl.imageSnippetDataUrl!,
+                              caption: `${hl.bookTitle || 'PDF'} · Page ${hl.locationNumber} Excerpt`,
+                            })
+                          }
+                          className="w-full max-h-28 object-contain rounded-lg border border-black/10 bg-white cursor-zoom-in"
+                        />
+                      )}
                       {hl.note && (
                         <div
                           className={`p-2 rounded border ${palette.surfaceBg} ${palette.borderHairline}`}
@@ -1641,6 +1740,16 @@ export const UnifiedReaderView: React.FC = () => {
 
             <div className="space-y-2 pt-2 border-t border-current/10">
               <label className="flex items-center justify-between py-1.5 cursor-pointer">
+                <span className="font-semibold">Live Word Wise Interlinear Hints</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings.liveWordWiseHints)}
+                  onChange={(e) => updateSettings({ liveWordWiseHints: e.target.checked })}
+                  className="accent-amber-600"
+                />
+              </label>
+
+              <label className="flex items-center justify-between py-1.5 cursor-pointer">
                 <span className="font-semibold">Bionic Reading Fixation</span>
                 <input
                   type="checkbox"
@@ -1782,30 +1891,31 @@ export const UnifiedReaderView: React.FC = () => {
       {/* Top Reader Utility Bar */}
       {!isZenMode ? (
         <header
-          className={`z-30 flex items-center justify-between gap-2 sm:gap-4 px-3 sm:px-6 py-2.5 sm:py-3 border-b shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
+          className={`z-30 flex items-center justify-between gap-2 sm:gap-3 px-3 sm:px-6 py-2.5 sm:py-3 border-b shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
         >
-          {/* Left: Back to Library + Book Title */}
-          <div className="flex items-center gap-2.5 sm:gap-4 min-w-0">
-            <button
-              type="button"
-              onClick={closeActiveBook}
-              className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${palette.borderHairline} hover:bg-black/5 dark:hover:bg-white/5`}
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Library</span>
-            </button>
-            <div className="min-w-0" dir="auto">
-              <h1 className="font-display text-xs sm:text-sm font-semibold truncate">
-                {activeBookMeta.title}
-              </h1>
-              <p className={`text-[10px] sm:text-[11px] truncate ${palette.textMuted}`}>
-                {activeBookMeta.author} · {currentChapter.title}
-              </p>
-            </div>
+          {/* Far-Left Pinned Back to Library Button (Never shrinks or clips on any screen size) */}
+          <button
+            type="button"
+            onClick={closeActiveBook}
+            aria-label="Back to Library"
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0 ${palette.elevatedBg} ${palette.borderHairline} hover:border-amber-500/60`}
+          >
+            <ArrowLeft className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <span>Back to Library</span>
+          </button>
+
+          {/* Center-Left Book Title (Truncates gracefully on narrow screens without affecting Back button) */}
+          <div className="min-w-0 flex-1 hidden sm:block px-1" dir="auto">
+            <h1 className="font-display text-xs sm:text-sm font-semibold truncate">
+              {activeBookMeta.title}
+            </h1>
+            <p className={`text-[10px] sm:text-[11px] truncate ${palette.textMuted}`}>
+              {activeBookMeta.author} · {currentChapter.title}
+            </p>
           </div>
 
-          {/* Right: Reader Tool Drawers */}
-          <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto shrink-0 py-0.5">
+          {/* Right: Reader Tool Drawers (Scrolls horizontally on small screens so Back button is never pushed off) */}
+          <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto min-w-0 max-w-full py-0.5">
             <button
               type="button"
               onClick={() => setActiveDrawer(activeDrawer === 'toc' ? 'none' : 'toc')}
@@ -1955,21 +2065,31 @@ export const UnifiedReaderView: React.FC = () => {
               type="button"
               onClick={toggleZenMode}
               className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
-              title="Enter Distraction-Free Zen Mode (Z or Tap Center)"
+              title="Enter Distraction-Free Zen Mode (Z)"
             >
               <Maximize2 className="w-4 h-4" />
             </button>
           </div>
         </header>
       ) : (
-        <button
-          type="button"
-          onClick={toggleZenMode}
-          className={`fixed top-3 right-3 z-50 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border shadow-md opacity-45 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
-        >
-          <Minimize2 className="w-3.5 h-3.5" />
-          <span>Exit Zen</span>
-        </button>
+        <div className="fixed top-3 left-3 right-3 z-50 flex items-center justify-between pointer-events-none">
+          <button
+            type="button"
+            onClick={closeActiveBook}
+            className={`pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-md opacity-85 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+          >
+            <ArrowLeft className="w-3.5 h-3.5 text-amber-500" />
+            <span>Back to Library</span>
+          </button>
+          <button
+            type="button"
+            onClick={toggleZenMode}
+            className={`pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border shadow-md opacity-85 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+            <span>Exit Zen</span>
+          </button>
+        </div>
       )}
 
       {/* Read-Aloud & Audio Sleep Timer Controller Bar */}
@@ -2034,12 +2154,19 @@ export const UnifiedReaderView: React.FC = () => {
           ref={selectionBarRef}
           className={`fixed bottom-16 sm:bottom-20 left-1/2 -translate-x-1/2 z-40 w-[94vw] max-w-xl rounded-2xl border p-3.5 shadow-2xl space-y-2.5 ${palette.elevatedBg} ${palette.borderHairline}`}
         >
-          {/* Selected Passage Preview */}
+          {/* Selected Passage Preview + Cropped PDF Figure Snippet Preview */}
           <div
             dir="auto"
-            className={`text-xs font-literata italic line-clamp-2 px-2.5 py-1.5 rounded-lg border ${palette.surfaceBg} ${palette.borderHairline}`}
+            className={`text-xs font-literata italic px-2.5 py-1.5 rounded-lg border flex items-center gap-2.5 ${palette.surfaceBg} ${palette.borderHairline}`}
           >
-            "{selectedText}"
+            {selectedPdfImageSnippet && (
+              <img
+                src={selectedPdfImageSnippet}
+                alt="PDF Figure Snippet"
+                className="w-12 h-10 object-contain rounded border border-black/10 bg-white shrink-0"
+              />
+            )}
+            <span className="line-clamp-2">"{selectedText}"</span>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -2142,10 +2269,11 @@ export const UnifiedReaderView: React.FC = () => {
             <VirtualizedPdfEngine
               book={activeBookMeta}
               hasActiveSelection={Boolean(selectedText)}
-              onSelectText={(text, pageNum, rects) => {
+              onSelectText={(text, pageNum, rects, imageSnippetDataUrl) => {
                 setSelectedText(cleanExtractedText(text));
                 setSelectedPdfPage(pageNum);
                 setSelectedPdfRects(rects);
+                setSelectedPdfImageSnippet(imageSnippetDataUrl);
               }}
               onWordLookup={handleWordLookup}
               onEditHighlight={openEditHighlightModal}
@@ -2179,13 +2307,16 @@ export const UnifiedReaderView: React.FC = () => {
                   initialFontSize: settings.fontSize || 19,
                 };
               } else if (e.touches.length === 1) {
+                const startX = e.touches[0].clientX;
                 touchGestureRef.current = {
-                  startX: e.touches[0].clientX,
+                  startX,
                   startY: e.touches[0].clientY,
                   startTime: Date.now(),
                   isPinch: false,
                   initialPinchDist: 0,
                   initialFontSize: settings.fontSize || 19,
+                  isLeftEdgeWarmthSwipe: startX <= 28,
+                  initialWarmth: settings.warmth || 0,
                 };
               }
             }}
@@ -2207,6 +2338,29 @@ export const UnifiedReaderView: React.FC = () => {
                   triggerFontScaleHud(nextFont);
                 }
                 return;
+              }
+
+              // Vertical Left-Edge Circadian Warmth / Brightness Swipe Gesture (Mobile & Tablet)
+              if (
+                !g.isPinch &&
+                g.isLeftEdgeWarmthSwipe &&
+                e.touches.length === 1 &&
+                !window.getSelection()?.toString()
+              ) {
+                const dy = g.startY - e.touches[0].clientY;
+                const dx = Math.abs(e.touches[0].clientX - g.startX);
+                if (Math.abs(dy) > 18 && Math.abs(dy) > dx * 1.4) {
+                  const deltaWarmth = Math.round(dy / 3.5);
+                  const nextWarmth = Math.min(
+                    80,
+                    Math.max(0, (g.initialWarmth ?? 0) + deltaWarmth)
+                  );
+                  if (nextWarmth !== settings.warmth) {
+                    updateSettings({ warmth: nextWarmth });
+                    triggerCustomHud(`Circadian Warmth · ${nextWarmth}%`);
+                  }
+                  return;
+                }
               }
 
               if (
@@ -2282,8 +2436,6 @@ export const UnifiedReaderView: React.FC = () => {
               } else if (settings.layoutMode !== 'scroll' && relX > 0.84) {
                 if (isBookRtl) handlePrevPage();
                 else handleNextPage();
-              } else if (relX >= 0.25 && relX <= 0.75) {
-                toggleZenMode();
               }
             }}
             className="flex-1 h-full overflow-y-auto px-4 sm:px-8 py-6 sm:py-12 flex flex-col items-center select-text"
@@ -2334,6 +2486,35 @@ export const UnifiedReaderView: React.FC = () => {
                   ? currentChapter.paragraphs.map((text, idx) => ({ text, paraIndex: idx }))
                   : currentPageParagraphs
                 ).map(({ text, paraIndex }, idx) => {
+                  // Archival EPUB Embedded Figure / Illustration Block (`[IMAGE_DATA:dataUrl|caption]`)
+                  if (text.startsWith('[IMAGE_DATA:')) {
+                    const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                    const pipeIdx = inner.indexOf('|');
+                    const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                    const caption =
+                      pipeIdx !== -1 ? inner.slice(pipeIdx + 1) : 'Embedded Archival Figure';
+                    return (
+                      <figure
+                        key={paraIndex}
+                        data-para-index={paraIndex}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLightboxImage({ src: dataUrl, caption });
+                        }}
+                        className={`break-inside-avoid-column my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in transition-transform hover:scale-[1.01] ${palette.surfaceBg} ${palette.borderHairline}`}
+                      >
+                        <img
+                          src={dataUrl}
+                          alt={caption}
+                          className="max-h-80 mx-auto object-contain rounded-lg"
+                        />
+                        <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                          {caption} · <span className="underline">Click to Zoom</span>
+                        </figcaption>
+                      </figure>
+                    );
+                  }
+
                   const paraRtl = isRtlText(text);
                   return (
                     <p
@@ -2407,6 +2588,12 @@ export const UnifiedReaderView: React.FC = () => {
             </span>
             <span aria-hidden="true">·</span>
             <span>{activeBookMeta.locator.percentage}%</span>
+            <span aria-hidden="true" className="hidden sm:inline">
+              ·
+            </span>
+            <span className="hidden sm:inline" title="Personalized Reading Speed & Chapter Time Estimator">
+              ~{personalizedReadingStats.minsLeftInChapter} min left in Ch. ({personalizedReadingStats.userWpm} WPM)
+            </span>
 
             {locationHistoryStack.length > 0 && (
               <button
@@ -2679,7 +2866,17 @@ export const UnifiedReaderView: React.FC = () => {
                 <div className="text-[11px] uppercase tracking-widest opacity-60">
                   Kindle Word Wise · Local Lexical Engine
                 </div>
-                <h3 className="font-display text-2xl font-bold mt-0.5">{wordWiseModal.word}</h3>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <h3 className="font-display text-2xl font-bold">{wordWiseModal.word}</h3>
+                  <button
+                    type="button"
+                    onClick={() => ttsService.speakText(wordWiseModal.word)}
+                    title="Pronounce Word Aloud"
+                    className={`p-1.5 rounded-full border cursor-pointer hover:opacity-85 ${palette.surfaceBg} ${palette.borderHairline}`}
+                  >
+                    <Volume2 className="w-3.5 h-3.5 text-amber-500" />
+                  </button>
+                </div>
                 <div className={`text-xs ${palette.textMuted}`}>
                   {wordWiseModal.phonetic} · <em>{wordWiseModal.partOfSpeech}</em>
                 </div>
@@ -2857,6 +3054,9 @@ export const UnifiedReaderView: React.FC = () => {
                     <strong>Swipe Left / Right:</strong> Turn page with tactile slide or 3D curl
                   </li>
                   <li>
+                    <strong>Left-Edge Vertical Swipe:</strong> Adjust circadian warmth filter
+                  </li>
+                  <li>
                     <strong>Tap Left / Right Margin:</strong> One-handed thumb page flip
                   </li>
                   <li>
@@ -2885,6 +3085,9 @@ export const UnifiedReaderView: React.FC = () => {
                     <strong>/ or Cmd+F:</strong> Instant in-book & in-PDF full-text search
                   </li>
                   <li>
+                    <strong>Cmd+K / Ctrl+K:</strong> Global Command Palette & Syntopicon Search
+                  </li>
+                  <li>
                     <strong>Split View Button:</strong> Pin drawer side-by-side on iPad/Desktop
                   </li>
                   <li>
@@ -2896,6 +3099,41 @@ export const UnifiedReaderView: React.FC = () => {
                 </ul>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full-Screen Archival Figure & PDF Excerpt Zoom Lightbox */}
+      {lightboxImage && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setLightboxImage(null);
+          }}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 sm:p-8"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`max-w-4xl w-full rounded-2xl border p-4 sm:p-6 shadow-2xl space-y-3 text-center ${palette.elevatedBg} ${palette.borderHairline}`}
+          >
+            <div className="flex items-center justify-between border-b border-current/10 pb-2.5">
+              <span className="font-display font-semibold text-sm truncate">
+                {lightboxImage.caption}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <img
+              src={lightboxImage.src}
+              alt={lightboxImage.caption}
+              className="max-h-[72dvh] mx-auto object-contain rounded-lg bg-white p-2"
+            />
           </div>
         </div>
       )}

@@ -13,6 +13,7 @@ import {
   Undo2,
   Trash2,
   LayoutGrid,
+  Columns,
   Crop,
   Moon,
   X,
@@ -138,10 +139,135 @@ export function cleanExtractedText(raw: string): string {
   return sanitizeAndRepairUnicodeText(text);
 }
 
+interface PdfThumbnailCardProps {
+  pdfDoc: pdfjsLib.PDFDocumentProxy | null;
+  pageNum: number;
+  totalPages: number;
+  isCurrent: boolean;
+  hlCount: number;
+  inkCount: number;
+  snippet: string;
+  filterStyle?: string;
+  palette: (typeof READING_THEMES)['paper'];
+  onSelectPage: (pageNum: number) => void;
+}
+
+const PdfThumbnailCard: React.FC<PdfThumbnailCardProps> = ({
+  pdfDoc,
+  pageNum,
+  totalPages,
+  isCurrent,
+  hlCount,
+  inkCount,
+  snippet,
+  filterStyle,
+  palette,
+  onSelectPage,
+}) => {
+  const cardRef = useRef<HTMLButtonElement | null>(null);
+  const thumbCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [isRendered, setIsRendered] = useState(false);
+
+  useEffect(() => {
+    if (!pdfDoc || isRendered || !cardRef.current) return;
+    let isCancelled = false;
+    let renderTask: pdfjsLib.RenderTask | null = null;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          observer.disconnect();
+          void (async () => {
+            try {
+              const page = await pdfDoc.getPage(pageNum);
+              if (isCancelled || !thumbCanvasRef.current) return;
+              const vp = page.getViewport({ scale: 0.28 });
+              const canvas = thumbCanvasRef.current;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) return;
+              canvas.width = Math.max(60, Math.round(vp.width));
+              canvas.height = Math.max(80, Math.round(vp.height));
+              ctx.fillStyle = '#FFFFFF';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              renderTask = page.render({ canvasContext: ctx, canvas, viewport: vp });
+              await renderTask.promise;
+              if (!isCancelled) setIsRendered(true);
+            } catch {
+              // ignore thumbnail cancellation
+            }
+          })();
+        }
+      },
+      { rootMargin: '140px' }
+    );
+
+    observer.observe(cardRef.current);
+    return () => {
+      isCancelled = true;
+      observer.disconnect();
+      try {
+        renderTask?.cancel();
+      } catch {
+        // ignore
+      }
+    };
+  }, [pdfDoc, pageNum, isRendered]);
+
+  return (
+    <button
+      ref={cardRef}
+      type="button"
+      onClick={() => onSelectPage(pageNum)}
+      className={`group rounded-xl border p-2.5 text-left flex flex-col justify-between aspect-[3/4] transition-all cursor-pointer overflow-hidden ${
+        isCurrent
+          ? `ring-2 ring-amber-500 ${palette.surfaceBg}`
+          : `hover:border-amber-500/50 ${palette.surfaceBg} ${palette.borderHairline}`
+      }`}
+    >
+      <div className="flex items-center justify-between text-[11px] tabular-nums w-full mb-1">
+        <span className="font-semibold">Pg {pageNum}</span>
+        {(hlCount > 0 || inkCount > 0) && (
+          <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+            {hlCount + inkCount} ★
+          </span>
+        )}
+      </div>
+
+      <div className="relative flex-1 w-full rounded-md overflow-hidden bg-white border border-black/10 flex items-center justify-center">
+        <canvas
+          ref={thumbCanvasRef}
+          style={{ filter: filterStyle }}
+          className={`w-full h-full object-contain transition-opacity duration-200 ${
+            isRendered ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+        {!isRendered && (
+          <p
+            dir="auto"
+            className="absolute inset-1.5 text-[9px] line-clamp-4 leading-snug text-stone-500 overflow-hidden"
+          >
+            {snippet || `Page ${pageNum}`}
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between text-[10px] opacity-65 tabular-nums w-full mt-1">
+        <span>{isRendered ? 'Visual Sheet' : 'Preview'}</span>
+        <span>{Math.round((pageNum / Math.max(1, totalPages)) * 100)}%</span>
+      </div>
+    </button>
+  );
+};
+
 interface VirtualizedPdfEngineProps {
   book: BookMeta;
   hasActiveSelection?: boolean;
-  onSelectText: (text: string, pageNumber: number, rects?: HighlightRect[]) => void;
+  onSelectText: (
+    text: string,
+    pageNumber: number,
+    rects?: HighlightRect[],
+    imageSnippetDataUrl?: string
+  ) => void;
   onWordLookup: (word: string, sentence: string) => void;
   onEditHighlight: (hl: Highlight) => void;
   onToggleImmersion?: () => void;
@@ -212,7 +338,9 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
   const pageWrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const secondCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
+  const secondRenderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
   const ocrAbortRef = useRef<number>(0);
 
   // Touch & Trackpad Gesture Refs (Swipe to Turn Page + Pinch to Zoom)
@@ -721,6 +849,62 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     };
   }, [pdfDoc, currentPage, scale, runAutomaticLiveText]);
 
+  // 3B. Render Companion Right-Hand Page when 2-Page Spread Mode (`settings.pdfSpreadMode === 'spread'`) is enabled
+  useEffect(() => {
+    if (!pdfDoc || settings.pdfSpreadMode !== 'spread' || currentPage >= totalPages) return;
+    let cancelled = false;
+
+    const renderCompanionSpreadPage = async () => {
+      try {
+        if (secondRenderTaskRef.current) {
+          try {
+            secondRenderTaskRef.current.cancel();
+          } catch {
+            // ignore
+          }
+        }
+        const companionPageNum = currentPage + 1;
+        if (companionPageNum > pdfDoc.numPages) return;
+        const page = await pdfDoc.getPage(companionPageNum);
+        if (cancelled || !secondCanvasRef.current) return;
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const effectiveScale = canvasCssSize.width / Math.max(1, baseViewport.width);
+        const hiDpiViewport = page.getViewport({ scale: effectiveScale * dpr });
+
+        const canvas = secondCanvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        canvas.width = hiDpiViewport.width;
+        canvas.height = hiDpiViewport.height;
+        canvas.style.width = `${canvasCssSize.width}px`;
+        canvas.style.height = `${canvasCssSize.height}px`;
+
+        const task = page.render({
+          canvasContext: ctx,
+          canvas,
+          viewport: hiDpiViewport,
+        });
+        secondRenderTaskRef.current = task;
+        await task.promise;
+      } catch {
+        // ignore companion page render cancellation
+      }
+    };
+
+    void renderCompanionSpreadPage();
+    return () => {
+      cancelled = true;
+      try {
+        secondRenderTaskRef.current?.cancel();
+      } catch {
+        // ignore
+      }
+    };
+  }, [pdfDoc, currentPage, totalPages, settings.pdfSpreadMode, canvasCssSize.width, canvasCssSize.height]);
+
   // 4. Geometric Hit-Testing: Find the exact PageWordBox under/nearest to pointer (xPct, yPct)
   const findWordIndexAtPoint = useCallback(
     (xPct: number, yPct: number, maxTolerancePct = 2.6): number | null => {
@@ -968,10 +1152,16 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           cropCanvas.width,
           cropCanvas.height
         );
+        const snippetDataUrl = cropCanvas.toDataURL('image/png');
         const worker = await getSharedOcrWorker();
         const res = await worker.recognize(cropCanvas, {}, { text: true });
         const cleaned = cleanExtractedText(res?.data?.text || '');
-        onSelectText(cleaned || `Page ${currentPage} Selection`, currentPage, [normRect]);
+        onSelectText(
+          cleaned || `Page ${currentPage} Figure Excerpt`,
+          currentPage,
+          [normRect],
+          snippetDataUrl
+        );
       }
     } catch (err) {
       console.warn('Region recognition note:', err);
@@ -1149,8 +1339,6 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           goToPage(currentPage - 1);
         } else if (xPct >= 86 && currentPage < totalPages) {
           goToPage(currentPage + 1);
-        } else if (downInfo.pointerType === 'touch') {
-          onToggleImmersion?.();
         }
         return;
       }
@@ -1193,9 +1381,39 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         if (wordsInsideRect.length > 0) {
           const phrase = cleanExtractedText(wordsInsideRect.map((w) => w.text).join(' '));
           const rects = buildMergedLineRects(wordsInsideRect);
+          let snippetDataUrl: string | undefined;
+          if (canvasRef.current) {
+            try {
+              const canvas = canvasRef.current;
+              const scaleX = canvas.width / Math.max(1, bounds.width);
+              const scaleY = canvas.height / Math.max(1, bounds.height);
+              const cropCanvas = document.createElement('canvas');
+              cropCanvas.width = Math.max(48, Math.round(regionRectPx.width * scaleX));
+              cropCanvas.height = Math.max(28, Math.round(regionRectPx.height * scaleY));
+              const ctx = cropCanvas.getContext('2d');
+              if (ctx) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
+                ctx.drawImage(
+                  canvas,
+                  regionRectPx.left * scaleX,
+                  regionRectPx.top * scaleY,
+                  regionRectPx.width * scaleX,
+                  regionRectPx.height * scaleY,
+                  0,
+                  0,
+                  cropCanvas.width,
+                  cropCanvas.height
+                );
+                snippetDataUrl = cropCanvas.toDataURL('image/png');
+              }
+            } catch {
+              // ignore crop error
+            }
+          }
           setRegionRectPx(null);
           setRegionStartPx(null);
-          onSelectText(phrase, currentPage, rects);
+          onSelectText(phrase, currentPage, rects, snippetDataUrl);
           return;
         }
       }
@@ -1352,8 +1570,9 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           </div>
         ) : (
           <>
-            {/* Interactive Visual Page with Geometric Apple-Live-Text Word Selection, Ink & Swipe Page Turn */}
-            <div
+            <div className="flex flex-wrap xl:flex-nowrap items-start justify-center gap-4 max-w-full">
+              {/* Interactive Visual Page with Geometric Apple-Live-Text Word Selection, Ink & Swipe Page Turn */}
+              <div
               ref={pageWrapperRef}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
@@ -1542,6 +1761,33 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               </button>
             </div>
 
+            {/* Companion Right-Hand Page when 2-Page Spread Mode is Enabled on Desktop / iPad Landscape */}
+            {settings.pdfSpreadMode === 'spread' && currentPage < totalPages && (
+              <div
+                onClick={() => goToPage(currentPage + 1)}
+                title={`Click to focus Page ${currentPage + 1}`}
+                style={{
+                  width: `${canvasCssSize.width}px`,
+                  height: `${canvasCssSize.height}px`,
+                }}
+                className="hidden xl:block relative shadow-xl rounded-lg overflow-hidden border border-black/10 bg-white max-w-full shrink-0 cursor-pointer group"
+              >
+                <canvas
+                  ref={secondCanvasRef}
+                  style={{
+                    filter: pdfCanvasFilterStyle,
+                    transform: settings.pdfAutoCropMargins ? 'scale(1.11)' : undefined,
+                    transformOrigin: 'center center',
+                  }}
+                  className="block w-full h-full pointer-events-none transition-transform duration-200"
+                />
+                <div className="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-md bg-stone-900/70 text-white text-[11px] font-medium backdrop-blur-xs">
+                  Page {currentPage + 1} (Spread)
+                </div>
+              </div>
+            )}
+          </div>
+
             {/* Editable Margin Notes & Highlights on This Page */}
             {pageHighlights.length > 0 && (
               <div
@@ -1616,7 +1862,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-3">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-3">
               {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((pageNum) => {
                 const hlCount = highlights.filter(
                   (h) =>
@@ -1628,37 +1874,22 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
                 const isCurrent = pageNum === currentPage;
 
                 return (
-                  <button
+                  <PdfThumbnailCard
                     key={pageNum}
-                    type="button"
-                    onClick={() => {
-                      goToPage(pageNum);
+                    pdfDoc={pdfDoc}
+                    pageNum={pageNum}
+                    totalPages={totalPages}
+                    isCurrent={isCurrent}
+                    hlCount={hlCount}
+                    inkCount={inkCount}
+                    snippet={snippet}
+                    filterStyle={pdfCanvasFilterStyle}
+                    palette={palette}
+                    onSelectPage={(target) => {
+                      goToPage(target);
                       setIsPageGridOpen(false);
                     }}
-                    className={`group rounded-xl border p-3 text-left flex flex-col justify-between aspect-[3/4] transition-all cursor-pointer ${
-                      isCurrent
-                        ? `ring-2 ring-amber-500 ${palette.surfaceBg}`
-                        : `hover:border-amber-500/50 ${palette.surfaceBg} ${palette.borderHairline}`
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-[11px] tabular-nums">
-                      <span className="font-semibold">Pg {pageNum}</span>
-                      {(hlCount > 0 || inkCount > 0) && (
-                        <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
-                          {hlCount + inkCount} ★
-                        </span>
-                      )}
-                    </div>
-                    <p
-                      dir="auto"
-                      className={`text-[10px] line-clamp-4 leading-snug my-1 ${palette.textMuted}`}
-                    >
-                      {snippet || `Document Page ${pageNum}`}
-                    </p>
-                    <div className="text-[10px] opacity-60 tabular-nums">
-                      {Math.round((pageNum / Math.max(1, totalPages)) * 100)}%
-                    </div>
-                  </button>
+                  />
                 );
               })}
             </div>
@@ -1727,6 +1958,23 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               title="Smart Sepia / Dark Theme Canvas Filter"
             >
               <Moon className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                updateSettings({
+                  pdfSpreadMode: settings.pdfSpreadMode === 'spread' ? 'single' : 'spread',
+                })
+              }
+              className={`hidden xl:inline-flex p-1.5 rounded-md cursor-pointer ${
+                settings.pdfSpreadMode === 'spread'
+                  ? `${palette.accentBg} text-white`
+                  : `${palette.surfaceBg} ${palette.textSecondary}`
+              }`}
+              title="Toggle 2-Page Side-by-Side PDF Book Spread (iPad Landscape & Desktop)"
+            >
+              <Columns className="w-3.5 h-3.5" />
             </button>
           </div>
 
