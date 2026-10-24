@@ -1,0 +1,6 @@
+{
+  "summary":  "Updated architectural plan ensuring 100% of Lumina Reader features (Kindle X-Ray, Word Wise Dictionary, Chapter Synthesis, PDF Reflow/Text Extraction, and Search) run locally and deterministically with zero dependency on Gemini, while retaining the pluggable AI adapter layer so nothing is skipped.",
+  "updatedAt":  "2026-10-24T14:48:52.328558118Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

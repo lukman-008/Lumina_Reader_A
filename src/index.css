@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-literata: 'Literata', Georgia, serif;
+    --font-merriweather: 'Merriweather', Georgia, serif;
+    --font-sans-ui: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono-reader: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans-ui);
+    overflow-x: hidden;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-literata {
+  font-family: var(--font-literata);
+}
+
+.font-merriweather {
+  font-family: var(--font-merriweather);
+}
+
+.font-sans-ui {
+  font-family: var(--font-sans-ui);
+}
+
+.font-mono-reader {
+  font-family: var(--font-mono-reader);
+}
+
+.font-dyslexic {
+  font-family: 'Comic Sans MS', 'Chalkboard SE', 'Plus Jakarta Sans', sans-serif;
+  letter-spacing: 0.04em;
+  word-spacing: 0.12em;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbars for editorial sanctuary */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 113, 108, 0.25);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 113, 108, 0.45);
+}

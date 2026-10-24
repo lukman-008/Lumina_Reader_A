@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Lumina Reader",
+  "short_name": "Lumina",
+  "description": "Next-generation cross-platform eBook & PDF sanctuary with OPF EPUB spine parsing, virtualized PDF.js rendering, Kindle Location indexing, and local X-Ray intelligence.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FBF9F5",
+  "theme_color": "#FBF9F5",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

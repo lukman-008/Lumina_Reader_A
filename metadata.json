@@ -1,0 +1,6 @@
+{
+  "name": "Lumina Reader",
+  "description": "Next-generation cross-platform eBook & PDF sanctuary engineered with split IndexedDB storage, true OPF EPUB spine parsing, virtualized PDF.js rendering, Kindle-style Location indexing, local X-Ray intelligence, and Word Wise SRS vocabulary.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+    <linearGradient id="pageGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f1f5f9" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#bgGrad)" />
+  <!-- Book spine & pages -->
+  <path d="M256 140 C280 120, 360 115, 410 135 L410 375 C360 355, 280 360, 256 385 C232 360, 152 355, 102 375 L102 135 C152 115, 232 120, 256 140 Z" fill="url(#pageGrad)" />
+  <path d="M256 140 L256 385" stroke="#cbd5e1" stroke-width="4" stroke-linecap="round" />
+  <!-- Bookmark ribbon -->
+  <path d="M330 125 L330 240 L310 220 L290 240 L290 125 Z" fill="url(#goldGrad)" />
+  <!-- Text lines on left page -->
+  <rect x="140" y="180" width="70" height="8" rx="4" fill="#94a3b8" />
+  <rect x="140" y="210" width="80" height="8" rx="4" fill="#94a3b8" />
+  <rect x="140" y="240" width="65" height="8" rx="4" fill="#94a3b8" />
+  <rect x="140" y="270" width="75" height="8" rx="4" fill="#94a3b8" />
+  <!-- Text lines on right page -->
+  <rect x="290" y="260" width="80" height="8" rx="4" fill="#94a3b8" />
+  <rect x="290" y="290" width="70" height="8" rx="4" fill="#94a3b8" />
+  <rect x="290" y="320" width="60" height="8" rx="4" fill="#94a3b8" />
+</svg>
