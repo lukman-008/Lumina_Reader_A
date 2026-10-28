@@ -7,14 +7,15 @@ This repository is built with **React 19 + TypeScript + Vite + Tailwind CSS v4**
 ---
 
 ## 📑 Table of Contents
-1. [Core Features & Architecture](#core-features--architecture)
-2. [Local Web Development & Verification](#local-web-development--verification)
-3. [Building the Android App (Method 1: Capacitor Native APK & Play Store AAB)](#building-the-android-app-method-1-capacitor-native-apk--play-store-aab)
-4. [Building the Android App (Method 2: Google Play TWA with Bubblewrap)](#building-the-android-app-method-2-google-play-twa-with-bubblewrap)
-5. [Optimizations for Android E-Ink Devices (Onyx Boox, Meebook, Kindle Fire)](#optimizations-for-android-e-ink-devices)
-6. [Building the iOS & iPadOS App (Capacitor + Xcode)](#building-the-ios--ipados-app-capacitor--xcode)
-7. [Building Desktop Apps (Tauri 2.0 & Electron)](#building-desktop-apps-tauri-20--electron)
-8. [Cross-Platform Storage & Performance Architecture](#cross-platform-storage--performance-architecture)
+1. [Core Features & Architecture](#1-core-features--architecture)
+2. [Cross-Device & Cross-OS Engineering Architecture](#2-cross-device--cross-os-engineering-architecture)
+3. [Local Web Development & Clean Dependency Verification](#3-local-web-development--clean-dependency-verification)
+4. [Building the Android App (Method 1: Capacitor Native APK & Play Store AAB)](#4-building-the-android-app-method-1-capacitor-native-apk--play-store-aab)
+5. [Building the Android App (Method 2: Google Play TWA with Bubblewrap)](#5-building-the-android-app-method-2-google-play-twa-with-bubblewrap)
+6. [Optimizations for Android E-Ink Devices (Onyx Boox, Meebook, Kindle Fire)](#6-optimizations-for-android-e-ink-devices)
+7. [Building the iOS & iPadOS App (Capacitor + Xcode)](#7-building-the-ios--ipados-app-capacitor--xcode)
+8. [Building Desktop Apps (Tauri 2.0 & Electron)](#8-building-desktop-apps-tauri-20--electron)
+9. [Cross-Platform Storage & Performance Architecture](#9-cross-platform-storage--performance-architecture)
 
 ---
 
@@ -32,15 +33,49 @@ This repository is built with **React 19 + TypeScript + Vite + Tailwind CSS v4**
 
 ---
 
-## 2. Local Web Development & Verification
+## 2. Cross-Device & Cross-OS Engineering Architecture
+
+Lumina Reader is engineered to run identically across **Android phones (Samsung OneUI, Pixel, Xiaomi HyperOS, OnePlus OxygenOS), iPhones (Dynamic Island), iPads (Portrait, Landscape, Split-View, Stage Manager), Android tablets/foldables, E-Ink readers, and Desktop monitors**.
+
+### 2.1 Android Notification Bar, Hole-Punch Camera & Safe-Area Protection
+Many Android WebViews and fullscreen PWAs report `env(safe-area-inset-top)` as `0px` even when the Android status/notification bar or hole-punch camera overlaps the top `28px–48px` of the screen. Lumina prevents top buttons (`Back`, `TOC`, `Aa`, `Search`) from ever being hidden:
+- **Multi-Signal Android & Touch Detection**: Detects Android via User-Agent (`/Android/i`), Linux ARM WebViews (`/Linux armv|Linux aarch64/i`), standalone PWA modes, and coarse-pointer viewports, applying an automatic **`36px–42px` top status-bar clearance (`--lumina-safe-top`)**.
+- **User-Adjustable Safe-Area Offset Presets**: Inside the Reader Appearance (`Aa`) drawer, users can fine-tune top clearance between **Auto (`0px`), Standard (`16px`), Deep Cutout (`32px`), and Max (`48px`)**—persisted in `localStorage`.
+- **Thumb-Zone Redundancy (Bottom Bar)**: Both the Reflowable Reader and PDF Engine include dedicated **`Library` (Back)** and **`Aa` (Options)** controls in the bottom thumb-zone footer so every core action is reachable one-handed even if the top HUD is hidden.
+
+### 2.2 Zero-Conflict Geometric Touch Selection Engine (No Android "Ask AI / Copy" OS Popup)
+On Android 13/14/15, native browser text selection (`::selection`) triggers an intrusive OS context menu (*"Copy | Share | Select All | Ask AI | Web Search"*) that covers the application's own toolbar.
+- **Native Callout Suppression on Touch (`@media (pointer: coarse)`)**: On touch screens, `.lumina-reader-surface` enforces `-webkit-user-select: none !important; user-select: none !important; -webkit-touch-callout: none !important;` and intercepts `contextmenu` and `selectstart`. Android OS never sees a native selection event and never spawns its system popup. Desktop mouse selection (`@media (pointer: fine)`) remains 100% native.
+- **60fps DOM Range Geometric Hit-Testing (`findWordAtPointInParagraph`)**: Uses `document.createTreeWalker` + `Range.getClientRects()` to map touch `(clientX, clientY)` coordinates to exact character offsets inside the original paragraph without wrapping words in thousands of `<span>` nodes.
+- **4 Seamless Touch Selection Modes**:
+  1. **Tap Any Word**: Tap any word in the center reading zone (`16%–84%` width) to highlight it and open Lumina's floating dictionary/highlight toolbar.
+  2. **Two-Tap Range Selection**: Tap the first word, then tap the last word of any phrase or sentence—Lumina automatically highlights the entire span between them.
+  3. **Hold & Drag (210ms)**: Press and hold for 210ms (with soft haptic feedback) and slide your finger across lines to scrub-select any passage at 60fps with non-passive `touchmove` scroll lock.
+  4. **1-Tap Smart Expanders**: Once a word is selected, tap **`+Words`**, **`Sentence`**, or **`Full Para`** in the Lumina floating bar to expand the selection to exact sentence or paragraph boundaries.
+
+### 2.3 Universal 2-Page Book Spread (iPad, Tablets, Foldables & Desktop)
+- **Reflowable EPUB/Text Spread**: When **2-Page Spread** is enabled (`viewMode: 'dual'`), Lumina renders an open-book two-leaf spread with a realistic center spine shadow, synchronized word-budget pagination (`145` words per leaf), automatic font scaling on mid-sized viewports (`560px–960px`), and two-page step turns (`±2` pages per turn).
+- **PDF Dual-Page Spread**: Renders `Page N` (left leaf) and `Page N + 1` (right leaf) side-by-side at native device pixel ratio, automatically resizing each leaf to fit the spread container. When a document ends on an odd page, the right leaf renders an archival colophon endpaper so the spread geometry never collapses.
+
+---
+
+## 3. Local Web Development & Clean Dependency Verification
 
 ### Prerequisites
-- **Node.js**: v18.x or v20.x+ (v22 recommended)
-- **Package Manager**: `npm` (v9+) or `bun`
+- **Node.js**: v18.x, v20.x, or v22.x+
+- **Package Manager**: `npm` (v9 / v10+) — installs cleanly with **zero peer-dependency conflicts (`ERESOLVE`)** and **no `-f` / `--force` flag required**.
+
+### Verified Dependency Compatibility Matrix
+All dependencies in `package.json` are strictly version-aligned so `npm install` succeeds out of the box without `--force` or `--legacy-peer-deps`:
+- `react` & `react-dom`: `^19.3.1`
+- `vite`: `^8.3.0` + `esbuild`: `^0.28.0` (aligned with Vite 8's `peerOptional esbuild@"^0.27.0 || ^0.28.0"`)
+- `@tailwindcss/vite` & `tailwindcss`: `^4.1.14`
+- `pdfjs-dist`: `^6.1.0` + `tesseract.js`: `^7.0.0`
+- `dexie`: `^4.3.0` + `jszip`: `^3.10.1` + `zustand`: `^5.0.12`
 
 ### Commands
 ```bash
-# Install dependencies
+# Install dependencies cleanly (no -f or --force needed)
 npm install
 
 # Start local full-stack development server (Express + Vite on port 3000)
@@ -55,17 +90,17 @@ npm run build
 
 ---
 
-## 3. Building the Android App (Method 1: Capacitor Native APK & Play Store AAB)
+## 4. Building the Android App (Method 1: Capacitor Native APK & Play Store AAB)
 
 [Capacitor](https://capacitorjs.com/) is the recommended method to produce a fully native Android package (`.apk` for sideloading/direct installation and `.aab` for Google Play Store publication) with full native hardware access, offline storage persistence, and immersive reading UI.
 
-### Step 3.1: Install Capacitor Dependencies
+### Step 4.1: Install Capacitor Dependencies
 Inside the project root:
 ```bash
 npm install @capacitor/core @capacitor/cli @capacitor/android
 ```
 
-### Step 3.2: Verify Capacitor Configuration (`capacitor.config.json`)
+### Step 4.2: Verify Capacitor Configuration (`capacitor.config.json`)
 This repository already includes a preconfigured `/capacitor.config.json` at the root directory (or you can regenerate it via `npx cap init "Lumina Reader" "com.luminareader.app" --web-dir dist`):
 
 ```json
@@ -97,7 +132,7 @@ This repository already includes a preconfigured `/capacitor.config.json` at the
 }
 ```
 
-### Step 3.3: Build Web Assets and Add Android Native Project
+### Step 4.3: Build Web Assets and Add Android Native Project
 ```bash
 # 1. Build the production bundle
 npm run build
@@ -109,7 +144,7 @@ npx cap add android
 npx cap sync android
 ```
 
-### Step 3.4: Configure Android Permissions & Immersive Reader Mode
+### Step 4.4: Configure Android Permissions & Immersive Reader Mode
 Open `android/app/src/main/AndroidManifest.xml` and ensure the following permissions and flags are set inside `<manifest>`:
 
 ```xml
@@ -160,7 +195,7 @@ Open `android/app/src/main/AndroidManifest.xml` and ensure the following permiss
 </application>
 ```
 
-### Step 3.5: Run on an Android Device / Emulator
+### Step 4.5: Run on an Android Device / Emulator
 Ensure you have **Android Studio** (Koala / Ladybug / Iguana) and **JDK 17 or 21** installed:
 ```bash
 # Open the project directly in Android Studio
@@ -170,7 +205,7 @@ npx cap open android
 npx cap run android
 ```
 
-### Step 3.6: Build Standalone Release APK & Google Play AAB Bundle
+### Step 4.6: Build Standalone Release APK & Google Play AAB Bundle
 Inside the `android/` directory:
 
 ```bash
@@ -202,27 +237,27 @@ apksigner sign --ks lumina-release-key.jks --out lumina-reader-signed.apk lumina
 
 ---
 
-## 4. Building the Android App (Method 2: Google Play TWA with Bubblewrap)
+## 5. Building the Android App (Method 2: Google Play TWA with Bubblewrap)
 
 If you already host Lumina Reader on HTTPS (e.g., your custom domain or Firebase/Cloud Run hosting), you can package it into a 100% Google Play compliant Android app using **Google Chrome Bubblewrap** without writing any native Java/Kotlin code.
 
-### Step 4.1: Install Bubblewrap CLI
+### Step 5.1: Install Bubblewrap CLI
 ```bash
 npm install -g @bubblewrap/cli
 ```
 
-### Step 4.2: Initialize and Generate Android Project
+### Step 5.2: Initialize and Generate Android Project
 ```bash
 bubblewrap init --manifest=https://your-domain.com/manifest.webmanifest
 ```
 Bubblewrap will automatically parse `public/manifest.webmanifest`, download icons, configure colors, and generate the Gradle project.
 
-### Step 4.3: Build Signed AAB
+### Step 5.3: Build Signed AAB
 ```bash
 bubblewrap build
 ```
 
-### Step 4.4: Digital Asset Links (Enable Fullscreen without Browser Address Bar)
+### Step 5.4: Digital Asset Links (Enable Fullscreen without Browser Address Bar)
 Upload the generated SHA-256 fingerprint into `/.well-known/assetlinks.json` on your web host:
 ```json
 [{
@@ -237,7 +272,7 @@ Upload the generated SHA-256 fingerprint into `/.well-known/assetlinks.json` on 
 
 ---
 
-## 5. Optimizations for Android E-Ink Devices
+## 6. Optimizations for Android E-Ink Devices
 
 Lumina Reader runs exceptionally well on Android-based E-Ink readers (**Onyx Boox, Meebook, Bigme, Boyue Likebook, Supernote, and Amazon Fire** sideloaded):
 
@@ -248,13 +283,13 @@ Lumina Reader runs exceptionally well on Android-based E-Ink readers (**Onyx Boo
 
 ---
 
-## 6. Building the iOS & iPadOS App (Capacitor + Xcode)
+## 7. Building the iOS & iPadOS App (Capacitor + Xcode)
 
 ### Prerequisites
 - macOS machine with **Xcode 15+** installed
 - Apple Developer Account (for device deployment and App Store submission)
 
-### Step 6.1: Add iOS Platform
+### Step 7.1: Add iOS Platform
 ```bash
 npm install @capacitor/ios
 npm run build
@@ -262,12 +297,12 @@ npx cap add ios
 npx cap sync ios
 ```
 
-### Step 6.2: Open in Xcode
+### Step 7.2: Open in Xcode
 ```bash
 npx cap open ios
 ```
 
-### Step 6.3: Xcode Settings & Capabilities
+### Step 7.3: Xcode Settings & Capabilities
 1. **Signing & Capabilities**: Select your Team and set a unique Bundle Identifier (`com.luminareader.app`).
 2. **Safe Area & Status Bar**: In `Info.plist`, ensure `UIViewControllerBasedStatusBarAppearance` is set to `true`.
 3. **iPad Multitasking**: Enable `Requires Full Screen: NO` so Lumina supports iPad Split View, Slide Over, and Stage Manager.
@@ -275,7 +310,7 @@ npx cap open ios
 
 ---
 
-## 7. Building Desktop Apps (Tauri 2.0 & Electron)
+## 8. Building Desktop Apps (Tauri 2.0 & Electron)
 
 ### Option A: Tauri 2.0 (Ultra-lightweight ~10MB native binary)
 Tauri uses the operating system's native WebView (WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux) and produces tiny, blazingly fast executables.
@@ -329,7 +364,7 @@ app.whenReady().then(createWindow);
 
 ---
 
-## 8. Cross-Platform Storage & Performance Architecture
+## 9. Cross-Platform Storage & Performance Architecture
 
 ### Persistent Storage Guarantee
 By default, mobile browsers may evict IndexedDB under storage pressure. Lumina requests persistent storage automatically on boot:

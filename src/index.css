@@ -77,3 +77,13 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+@media (pointer: coarse) {
+  .lumina-reader-surface,
+  .lumina-reader-surface * {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+  }
+}
+
+

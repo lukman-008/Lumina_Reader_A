@@ -121,6 +121,11 @@ export const UnifiedReaderView: React.FC = () => {
   // Selection, Quote Card & Word Wise State
   const [selectedText, setSelectedText] = useState('');
   const [selectedParaIdx, setSelectedParaIdx] = useState<number>(0);
+  const [selectedCharRange, setSelectedCharRange] = useState<{
+    paraIndex: number;
+    start: number;
+    end: number;
+  } | null>(null);
   const [selectedPdfPage, setSelectedPdfPage] = useState<number | null>(null);
   const [selectedPdfRects, setSelectedPdfRects] = useState<HighlightRect[] | undefined>(undefined);
   const [selectedPdfImageSnippet, setSelectedPdfImageSnippet] = useState<string | undefined>(
@@ -141,23 +146,46 @@ export const UnifiedReaderView: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  const isAndroidDevice =
-    typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
-  const isStandaloneDisplay =
+  const isAndroidOrTouchMobile =
     typeof window !== 'undefined' &&
-    (window.matchMedia?.('(display-mode: standalone)').matches ||
-      window.matchMedia?.('(display-mode: fullscreen)').matches);
+    (/Android/i.test(navigator.userAgent || '') ||
+      /Linux armv|Linux aarch64/i.test(navigator.platform || '') ||
+      window.matchMedia?.('(display-mode: standalone)').matches ||
+      window.matchMedia?.('(display-mode: fullscreen)').matches ||
+      (window.matchMedia?.('(pointer: coarse)').matches && window.innerWidth < 920));
 
   const safeTopPx =
     typeof settings.safeAreaTopOffset === 'number' && settings.safeAreaTopOffset > 0
       ? settings.safeAreaTopOffset
-      : isAndroidDevice || isStandaloneDisplay
-      ? 36
+      : isAndroidOrTouchMobile
+      ? 42
       : 0;
 
   // True 2-Page Book Spread is active whenever 2-Page Spread mode is selected
   const isTwoPageSpreadActive = settings.layoutMode === 'double';
+  const effectiveSpreadFontSize = isTwoPageSpreadActive
+    ? viewportWidth < 520
+      ? Math.min(13, settings.fontSize)
+      : viewportWidth < 768
+      ? Math.min(15, settings.fontSize)
+      : viewportWidth < 1024
+      ? Math.min(17, settings.fontSize)
+      : settings.fontSize
+    : settings.fontSize;
+
   const isTouchActiveRef = useRef<boolean>(false);
+  const [isTouchSelecting, setIsTouchSelecting] = useState<boolean>(false);
+  const isTouchSelectingRef = useRef<boolean>(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const justFinishedTouchSelectRef = useRef<number>(0);
+  const touchSelectionAnchorRef = useRef<{
+    paraIndex: number;
+    startChar: number;
+    endChar: number;
+    fullText: string;
+    isSingleWord: boolean;
+  } | null>(null);
+  const mainReaderRef = useRef<HTMLElement | null>(null);
 
   // Full-Screen Archival Figure Lightbox Modal State
   const [lightboxImage, setLightboxImage] = useState<{
@@ -295,10 +323,10 @@ export const UnifiedReaderView: React.FC = () => {
   }, [chapters, currentChapterIndex, activeBookMeta]);
 
   const wordsPerPage = useMemo(() => {
-    const baseWords = 215;
+    const baseWords = isTwoPageSpreadActive ? 145 : 215;
     const scaleFactor = 19 / Math.max(14, settings.fontSize || 19);
-    return Math.max(85, Math.round(baseWords * scaleFactor));
-  }, [settings.fontSize]);
+    return Math.max(75, Math.round(baseWords * scaleFactor));
+  }, [settings.fontSize, isTwoPageSpreadActive]);
 
   const paginatedPages = useMemo(() => {
     const pages: { text: string; paraIndex: number }[][] = [];
@@ -696,9 +724,128 @@ export const UnifiedReaderView: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   });
 
-  // Real-time selectionchange listener for Android/iOS long-press and handle dragging
+  // Geometric DOM Range Hit-Tester for Touch Selection (Works with user-select: none so Android OS never shows 'Ask AI / Copy' popup)
+  const findWordAtPointInParagraph = (
+    paraEl: HTMLElement,
+    clientX: number,
+    clientY: number
+  ): { word: string; startChar: number; endChar: number; fullText: string } | null => {
+    const walker = document.createTreeWalker(paraEl, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('[data-lumina-ui-badge="true"], rt, button')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    const spans: { node: Text; start: number; end: number }[] = [];
+    let fullText = '';
+    let cur = walker.nextNode() as Text | null;
+    while (cur) {
+      const val = cur.nodeValue || '';
+      if (val.length > 0) {
+        const start = fullText.length;
+        fullText += val;
+        spans.push({ node: cur, start, end: fullText.length });
+      }
+      cur = walker.nextNode() as Text | null;
+    }
+
+    if (!fullText || spans.length === 0) return null;
+
+    const range = document.createRange();
+    const wordRegex = /\S+/g;
+    let match: RegExpExecArray | null;
+    let bestHit: {
+      word: string;
+      startChar: number;
+      endChar: number;
+      dist: number;
+    } | null = null;
+
+    while ((match = wordRegex.exec(fullText)) !== null) {
+      const rawStart = match.index;
+      const rawEnd = rawStart + match[0].length;
+
+      const startSpan = spans.find((s) => rawStart >= s.start && rawStart < s.end);
+      const endSpan = spans.find((s) => rawEnd > s.start && rawEnd <= s.end);
+      if (!startSpan || !endSpan) continue;
+
+      try {
+        range.setStart(startSpan.node, rawStart - startSpan.start);
+        range.setEnd(endSpan.node, rawEnd - endSpan.start);
+        const rects = range.getClientRects();
+        for (let i = 0; i < rects.length; i++) {
+          const rect = rects[i];
+          if (rect.width === 0 && rect.height === 0) continue;
+
+          const dx =
+            clientX < rect.left
+              ? rect.left - clientX
+              : clientX > rect.right
+              ? clientX - rect.right
+              : 0;
+          const dy =
+            clientY < rect.top
+              ? rect.top - clientY
+              : clientY > rect.bottom
+              ? clientY - rect.bottom
+              : 0;
+
+          if (dy > 26 || dx > 42) continue;
+
+          const dist = dy * 2.8 + dx;
+          if (!bestHit || dist < bestHit.dist) {
+            const rawToken = match[0];
+            const leadMatch = rawToken.match(/^[^\p{L}\p{M}\p{N}]+/u);
+            const trailMatch = rawToken.match(/[^\p{L}\p{M}\p{N}]+$/u);
+            const leadLen = leadMatch ? leadMatch[0].length : 0;
+            const trailLen = trailMatch ? trailMatch[0].length : 0;
+            const cleanStart =
+              rawStart + leadLen < rawEnd - trailLen ? rawStart + leadLen : rawStart;
+            const cleanEnd = rawEnd - trailLen > cleanStart ? rawEnd - trailLen : rawEnd;
+
+            bestHit = {
+              word: fullText.slice(cleanStart, cleanEnd),
+              startChar: cleanStart,
+              endChar: cleanEnd,
+              dist,
+            };
+          }
+        }
+        if (bestHit && bestHit.dist === 0) break;
+      } catch {
+        // ignore range boundary edge cases
+      }
+    }
+
+    if (!bestHit || !bestHit.word) return null;
+    return {
+      word: bestHit.word,
+      startChar: bestHit.startChar,
+      endChar: bestHit.endChar,
+      fullText,
+    };
+  };
+
+  // Non-passive touchmove lock when Hold-and-Drag word selection is active on touch screens
   useEffect(() => {
-    let settleTimer: number | null = null;
+    const el = mainReaderRef.current;
+    if (!el) return;
+    const onNativeTouchMove = (e: TouchEvent) => {
+      if (isTouchSelectingRef.current) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener('touchmove', onNativeTouchMove, { passive: false });
+    return () => el.removeEventListener('touchmove', onNativeTouchMove);
+  }, [activeBookMeta?.id, activeBookMeta?.format]);
+
+  // Real-time selectionchange listener for Desktop mouse drag and fallback native selection
+  useEffect(() => {
     const onSelectionChange = () => {
       if (activeBookMeta?.format === 'pdf') return;
       const selObj = window.getSelection();
@@ -720,33 +867,35 @@ export const UnifiedReaderView: React.FC = () => {
       }
       setSelectedText(cleaned);
 
-      // On Android / touch devices, once the user lifts their finger, auto-collapse the native DOM range after 180ms
-      // so Android OS closes its intrusive "Copy / Share / Ask AI" popup while Lumina's Selection Bar stays open
-      if (settleTimer) window.clearTimeout(settleTimer);
-      if (!isTouchActiveRef.current && ('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
-        settleTimer = window.setTimeout(() => {
-          try {
-            window.getSelection()?.removeAllRanges();
-          } catch {
-            // ignore
-          }
-        }, 180);
+      // On any touch device, immediately collapse native DOM range so Android OS never shows its "Ask AI / Copy" popup
+      if (
+        isTouchActiveRef.current ||
+        window.matchMedia?.('(pointer: coarse)').matches ||
+        navigator.maxTouchPoints > 0
+      ) {
+        try {
+          selObj.removeAllRanges();
+        } catch {
+          // ignore
+        }
       }
     };
 
     document.addEventListener('selectionchange', onSelectionChange);
     return () => {
       document.removeEventListener('selectionchange', onSelectionChange);
-      if (settleTimer) window.clearTimeout(settleTimer);
     };
   }, [activeBookMeta?.format]);
 
-  // Dismiss Floating Selection Bar cleanly on outside pointerdown without racing pointerup
+  // Dismiss Floating Selection Bar cleanly on outside pointerdown without breaking Two-Tap Range Selection
   useEffect(() => {
     if (!selectedText) return;
     const onPointerDownOutside = (e: PointerEvent) => {
       const target = e.target as HTMLElement;
       if (selectionBarRef.current?.contains(target)) return;
+      if (target.closest?.('[data-para-index], [data-pdf-interactive="true"]')) return;
+      touchSelectionAnchorRef.current = null;
+      setSelectedCharRange(null);
       setSelectedText('');
       setSelectedPdfRects(undefined);
       setShowNoteInput(false);
@@ -935,6 +1084,8 @@ export const UnifiedReaderView: React.FC = () => {
       rects: isPdf ? selectedPdfRects : undefined,
       imageSnippetDataUrl: isPdf ? selectedPdfImageSnippet : undefined,
     });
+    touchSelectionAnchorRef.current = null;
+    setSelectedCharRange(null);
     setSelectedText('');
     setSelectedPdfPage(null);
     setSelectedPdfRects(undefined);
@@ -1053,13 +1204,20 @@ export const UnifiedReaderView: React.FC = () => {
       }
     }
 
-    // Visual Active Touch Selection Highlight (so collapsing native Android selection still shows exact selected text)
+    // Visual Active Touch Selection Highlight (Uses exact character range when available so duplicate words highlight the exact tapped word)
     if (
       selectedText &&
-      selectedText.trim().length >= 2 &&
+      selectedText.trim().length >= 1 &&
       selectedParaIdx === paraIndex
     ) {
-      const activeSelSpan = findTextSpanInParagraph(text, selectedText);
+      const activeSelSpan =
+        selectedCharRange &&
+        selectedCharRange.paraIndex === paraIndex &&
+        selectedCharRange.end > selectedCharRange.start &&
+        selectedCharRange.end <= text.length
+          ? { start: selectedCharRange.start, end: selectedCharRange.end }
+          : findTextSpanInParagraph(text, selectedText);
+
       if (
         activeSelSpan &&
         !matchedSpans.some(
@@ -1112,7 +1270,10 @@ export const UnifiedReaderView: React.FC = () => {
               }`}
             >
               {sliceText}
-              <span className="ml-1.5 inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold underline opacity-85 select-none">
+              <span
+                data-lumina-ui-badge="true"
+                className="ml-1.5 inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold underline opacity-85 select-none"
+              >
                 <Edit3 className="w-3 h-3 inline" />
                 {hl.note ? `Note: ${hl.note}` : 'Edit'}
               </span>
@@ -1123,7 +1284,7 @@ export const UnifiedReaderView: React.FC = () => {
             <mark
               key={`spotlight-${idx}`}
               data-jump-spotlight="true"
-              className="bg-amber-400/55 dark:bg-amber-500/40 text-inherit rounded-xs px-1 py-0.5 ring-2 ring-amber-500 shadow-sm animate-pulse"
+              className="bg-amber-400/55 dark:bg-amber-500/40 text-inherit rounded-xs px-1 py-0.5 ring-2 ring-amber-500 shadow-sm"
             >
               {sliceText}
             </mark>
@@ -1142,6 +1303,7 @@ export const UnifiedReaderView: React.FC = () => {
         nodes.push(
           <mark
             key={`para-hl-${hl.id}`}
+            data-lumina-ui-badge="true"
             data-highlight-id={hl.id}
             data-jump-spotlight={isSpotlighted ? 'true' : undefined}
             onClick={(e) => {
@@ -1154,7 +1316,10 @@ export const UnifiedReaderView: React.FC = () => {
             }`}
           >
             "{hl.selectedText}"
-            <span className="ml-1.5 inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold underline opacity-85">
+            <span
+              data-lumina-ui-badge="true"
+              className="ml-1.5 inline-flex items-center gap-0.5 text-[11px] font-sans font-semibold underline opacity-85"
+            >
               <Edit3 className="w-3 h-3 inline" />
               {hl.note ? `Note: ${hl.note}` : 'Edit'}
             </span>
@@ -1191,7 +1356,10 @@ export const UnifiedReaderView: React.FC = () => {
                 className="cursor-pointer border-b border-dotted border-amber-500/75 hover:bg-amber-500/10 rounded-xs px-0.5 transition-colors"
               >
                 {token}
-                <rt className="text-[9px] font-sans font-medium text-amber-700 dark:text-amber-400 select-none tracking-normal px-0.5">
+                <rt
+                  data-lumina-ui-badge="true"
+                  className="text-[9px] font-sans font-medium text-amber-700 dark:text-amber-400 select-none tracking-normal px-0.5"
+                >
                   {hint}
                 </rt>
               </ruby>
@@ -2378,18 +2546,30 @@ export const UnifiedReaderView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        const paraText = cleanExtractedText(
-                          currentChapter.paragraphs[selectedParaIdx] || ''
-                        );
-                        const idx = paraText.toLowerCase().indexOf(selectedText.toLowerCase());
-                        if (idx !== -1) {
-                          const after = paraText.slice(idx + selectedText.length);
-                          const nextWordsMatch = after.match(/^(\s*\S+){1,4}/);
-                          const expanded = (
-                            paraText.slice(idx, idx + selectedText.length) +
-                            (nextWordsMatch ? nextWordsMatch[0] : '')
-                          ).trim();
-                          if (expanded) setSelectedText(expanded);
+                        const rawPara = currentChapter.paragraphs[selectedParaIdx] || '';
+                        const curStart =
+                          selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
+                            ? selectedCharRange.start
+                            : Math.max(0, rawPara.toLowerCase().indexOf(selectedText.toLowerCase()));
+                        const curEnd =
+                          selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
+                            ? selectedCharRange.end
+                            : curStart + selectedText.length;
+
+                        const after = rawPara.slice(curEnd);
+                        const nextWordsMatch = after.match(/^(\s*\S+){1,4}/);
+                        const newEnd = curEnd + (nextWordsMatch ? nextWordsMatch[0].length : 0);
+                        const expanded = cleanExtractedText(rawPara.slice(curStart, newEnd));
+                        if (expanded) {
+                          setSelectedCharRange({
+                            paraIndex: selectedParaIdx,
+                            start: curStart,
+                            end: newEnd,
+                          });
+                          if (touchSelectionAnchorRef.current) {
+                            touchSelectionAnchorRef.current.isSingleWord = false;
+                          }
+                          setSelectedText(expanded);
                         }
                         window.getSelection()?.removeAllRanges();
                       }}
@@ -2402,15 +2582,40 @@ export const UnifiedReaderView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        const paraText = cleanExtractedText(
-                          currentChapter.paragraphs[selectedParaIdx] || ''
-                        );
-                        const sentences =
-                          paraText.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [paraText];
-                        const matchSentence = sentences.find((s) =>
-                          s.toLowerCase().includes(selectedText.toLowerCase())
-                        );
-                        setSelectedText((matchSentence || paraText).trim());
+                        const rawPara = currentChapter.paragraphs[selectedParaIdx] || '';
+                        const curStart =
+                          selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
+                            ? selectedCharRange.start
+                            : Math.max(0, rawPara.toLowerCase().indexOf(selectedText.toLowerCase()));
+                        let sentStart = curStart;
+                        while (sentStart > 0 && !/[.!?]/.test(rawPara[sentStart - 1])) {
+                          sentStart--;
+                        }
+                        while (sentStart < curStart && /\s/.test(rawPara[sentStart])) {
+                          sentStart++;
+                        }
+                        let sentEnd =
+                          selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
+                            ? selectedCharRange.end
+                            : curStart + selectedText.length;
+                        while (sentEnd < rawPara.length && !/[.!?]/.test(rawPara[sentEnd])) {
+                          sentEnd++;
+                        }
+                        if (sentEnd < rawPara.length && /[.!?]/.test(rawPara[sentEnd])) {
+                          sentEnd++;
+                        }
+                        const expanded = cleanExtractedText(rawPara.slice(sentStart, sentEnd));
+                        if (expanded) {
+                          setSelectedCharRange({
+                            paraIndex: selectedParaIdx,
+                            start: sentStart,
+                            end: sentEnd,
+                          });
+                          if (touchSelectionAnchorRef.current) {
+                            touchSelectionAnchorRef.current.isSingleWord = false;
+                          }
+                          setSelectedText(expanded);
+                        }
                         window.getSelection()?.removeAllRanges();
                       }}
                       className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${palette.borderHairline}`}
@@ -2422,10 +2627,19 @@ export const UnifiedReaderView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        const fullPara = cleanExtractedText(
-                          currentChapter.paragraphs[selectedParaIdx] || ''
-                        );
-                        if (fullPara) setSelectedText(fullPara);
+                        const rawPara = currentChapter.paragraphs[selectedParaIdx] || '';
+                        const fullPara = cleanExtractedText(rawPara);
+                        if (fullPara) {
+                          setSelectedCharRange({
+                            paraIndex: selectedParaIdx,
+                            start: 0,
+                            end: rawPara.length,
+                          });
+                          if (touchSelectionAnchorRef.current) {
+                            touchSelectionAnchorRef.current.isSingleWord = false;
+                          }
+                          setSelectedText(fullPara);
+                        }
                         window.getSelection()?.removeAllRanges();
                       }}
                       className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${palette.borderHairline}`}
@@ -2532,6 +2746,8 @@ export const UnifiedReaderView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
+                  touchSelectionAnchorRef.current = null;
+                  setSelectedCharRange(null);
                   setSelectedText('');
                   setSelectedPdfRects(undefined);
                   setShowNoteInput(false);
@@ -2583,11 +2799,15 @@ export const UnifiedReaderView: React.FC = () => {
               onWordLookup={handleWordLookup}
               onEditHighlight={openEditHighlightModal}
               onToggleImmersion={toggleZenMode}
+              onOpenTypographyDrawer={() =>
+                setActiveDrawer((d) => (d === 'typography' ? 'none' : 'typography'))
+              }
             />
           </div>
         ) : (
-          /* Reflowable Reader Viewport */
+          /* Reflowable Reader Viewport with Geometric Touch Selection Engine */
           <main
+            ref={mainReaderRef}
             onContextMenu={(e) => {
               // Suppress Android / iOS native floating ActionMode / "Ask AI" contextmenu so Lumina's Selection Bar is never covered
               e.preventDefault();
@@ -2605,7 +2825,13 @@ export const UnifiedReaderView: React.FC = () => {
             }}
             onTouchStart={(e) => {
               isTouchActiveRef.current = true;
+              if (longPressTimerRef.current) {
+                window.clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+              }
               if (e.touches.length === 2) {
+                isTouchSelectingRef.current = false;
+                setIsTouchSelecting(false);
                 const dx = e.touches[0].clientX - e.touches[1].clientX;
                 const dy = e.touches[0].clientY - e.touches[1].clientY;
                 touchGestureRef.current = {
@@ -2618,9 +2844,10 @@ export const UnifiedReaderView: React.FC = () => {
                 };
               } else if (e.touches.length === 1) {
                 const startX = e.touches[0].clientX;
+                const startY = e.touches[0].clientY;
                 touchGestureRef.current = {
                   startX,
-                  startY: e.touches[0].clientY,
+                  startY,
                   startTime: Date.now(),
                   isPinch: false,
                   initialPinchDist: 0,
@@ -2628,11 +2855,93 @@ export const UnifiedReaderView: React.FC = () => {
                   isLeftEdgeWarmthSwipe: startX <= 28,
                   initialWarmth: settings.warmth || 0,
                 };
+
+                // Start 210ms Geometric Hold-and-Drag Word Selection Timer (Faster than Android OS 450ms long-press)
+                const targetEl = e.target as HTMLElement;
+                const paraEl = targetEl?.closest?.('p[data-para-index]') as HTMLElement | null;
+                if (
+                  paraEl &&
+                  !targetEl.closest('mark, button, a, input, textarea, figure') &&
+                  startX > 28
+                ) {
+                  const pIdx = Number(paraEl.getAttribute('data-para-index'));
+                  longPressTimerRef.current = window.setTimeout(() => {
+                    longPressTimerRef.current = null;
+                    const hit = findWordAtPointInParagraph(paraEl, startX, startY);
+                    if (hit && Number.isFinite(pIdx)) {
+                      isTouchSelectingRef.current = true;
+                      setIsTouchSelecting(true);
+                      touchSelectionAnchorRef.current = {
+                        paraIndex: pIdx,
+                        startChar: hit.startChar,
+                        endChar: hit.endChar,
+                        fullText: hit.fullText,
+                        isSingleWord: true,
+                      };
+                      setSelectedParaIdx(pIdx);
+                      setSelectedCharRange({
+                        paraIndex: pIdx,
+                        start: hit.startChar,
+                        end: hit.endChar,
+                      });
+                      setSelectedText(hit.word);
+                      try {
+                        navigator.vibrate?.(10);
+                      } catch {
+                        // ignore
+                      }
+                    }
+                  }, 210);
+                }
               }
             }}
             onTouchMove={(e) => {
               const g = touchGestureRef.current;
               if (!g) return;
+
+              if (e.touches.length === 1 && longPressTimerRef.current) {
+                const moveDist = Math.hypot(
+                  e.touches[0].clientX - g.startX,
+                  e.touches[0].clientY - g.startY
+                );
+                if (moveDist > 10) {
+                  window.clearTimeout(longPressTimerRef.current);
+                  longPressTimerRef.current = null;
+                }
+              }
+
+              // Live 60fps Word-by-Word Hold-and-Drag Selection on Touch Devices
+              if (
+                isTouchSelectingRef.current &&
+                touchSelectionAnchorRef.current &&
+                e.touches.length === 1
+              ) {
+                const anchor = touchSelectionAnchorRef.current;
+                const paraEl = document.querySelector(
+                  `p[data-para-index="${anchor.paraIndex}"]`
+                ) as HTMLElement | null;
+                if (paraEl) {
+                  const curHit = findWordAtPointInParagraph(
+                    paraEl,
+                    e.touches[0].clientX,
+                    e.touches[0].clientY
+                  );
+                  if (curHit) {
+                    const rangeStart = Math.min(anchor.startChar, curHit.startChar);
+                    const rangeEnd = Math.max(anchor.endChar, curHit.endChar);
+                    anchor.isSingleWord =
+                      rangeStart === anchor.startChar && rangeEnd === anchor.endChar;
+                    setSelectedCharRange({
+                      paraIndex: anchor.paraIndex,
+                      start: rangeStart,
+                      end: rangeEnd,
+                    });
+                    const slice = cleanExtractedText(anchor.fullText.slice(rangeStart, rangeEnd));
+                    if (slice) setSelectedText(slice);
+                  }
+                }
+                return;
+              }
 
               if (g.isPinch && e.touches.length === 2 && g.initialPinchDist > 20) {
                 const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -2689,6 +2998,19 @@ export const UnifiedReaderView: React.FC = () => {
             }}
             onTouchEnd={(e) => {
               isTouchActiveRef.current = false;
+              if (longPressTimerRef.current) {
+                window.clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+              }
+              if (isTouchSelectingRef.current) {
+                isTouchSelectingRef.current = false;
+                setIsTouchSelecting(false);
+                justFinishedTouchSelectRef.current = Date.now();
+                touchGestureRef.current = null;
+                setSwipeDeltaX(0);
+                return;
+              }
+
               const g = touchGestureRef.current;
               touchGestureRef.current = null;
               setSwipeDeltaX(0);
@@ -2714,39 +3036,128 @@ export const UnifiedReaderView: React.FC = () => {
                   return;
                 }
               }
-
-              setTimeout(() => {
-                const rawSelection = window.getSelection();
-                const sel = cleanExtractedText(rawSelection?.toString() || '');
-                if (sel.length > 1) {
-                  setSelectedText(sel);
-                  // Collapse native DOM selection on touch devices after capturing so Android's native "Ask AI / Copy / Share" bar auto-dismisses
-                  try {
-                    rawSelection?.removeAllRanges();
-                  } catch {
-                    // ignore
-                  }
-                }
-              }, 120);
+            }}
+            onTouchCancel={() => {
+              isTouchActiveRef.current = false;
+              if (longPressTimerRef.current) {
+                window.clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+              }
+              if (isTouchSelectingRef.current) {
+                isTouchSelectingRef.current = false;
+                setIsTouchSelecting(false);
+                justFinishedTouchSelectRef.current = Date.now();
+              }
+              touchGestureRef.current = null;
+              setSwipeDeltaX(0);
+              try {
+                window.getSelection()?.removeAllRanges();
+              } catch {
+                // ignore
+              }
             }}
             onMouseUp={() => {
               const sel = cleanExtractedText(window.getSelection()?.toString() || '');
               if (sel.length > 1) {
+                setSelectedCharRange(null);
                 setSelectedText(sel);
               }
             }}
             onClick={(e) => {
+              if (Date.now() - justFinishedTouchSelectRef.current < 350) return;
+
               if (activeDrawer !== 'none' && !isDrawerPinned) {
                 setActiveDrawer('none');
                 return;
               }
-              const currentSelection = window.getSelection()?.toString().trim() || '';
-              if (currentSelection.length > 0 || selectedText) return;
               const target = e.target as HTMLElement;
-              if (target.closest('mark, button, a, input, textarea')) return;
+              if (target.closest('mark, button, a, input, textarea, figure')) return;
 
               const rect = e.currentTarget.getBoundingClientRect();
               const relX = (e.clientX - rect.left) / Math.max(1, rect.width);
+
+              // Center reading zone (16%..84%): Support Tap-a-Word & Two-Tap Range Selection on Touch Devices
+              if (relX >= 0.16 && relX <= 0.84) {
+                const isTouchEnv =
+                  window.matchMedia?.('(pointer: coarse)').matches ||
+                  'ontouchstart' in window ||
+                  navigator.maxTouchPoints > 0;
+                const paraEl = target.closest?.('p[data-para-index]') as HTMLElement | null;
+
+                if (isTouchEnv && paraEl && !isTtsBarOpen) {
+                  const pIdx = Number(paraEl.getAttribute('data-para-index'));
+                  const hit = findWordAtPointInParagraph(paraEl, e.clientX, e.clientY);
+                  const prevAnchor = touchSelectionAnchorRef.current;
+
+                  if (hit && Number.isFinite(pIdx)) {
+                    // Two-Tap Range Selection: Tap 1 anchored a single word, Tap 2 expands to full phrase between Word 1 and Word 2
+                    if (
+                      selectedText &&
+                      prevAnchor &&
+                      prevAnchor.paraIndex === pIdx &&
+                      prevAnchor.isSingleWord &&
+                      hit.startChar !== prevAnchor.startChar
+                    ) {
+                      const rangeStart = Math.min(prevAnchor.startChar, hit.startChar);
+                      const rangeEnd = Math.max(prevAnchor.endChar, hit.endChar);
+                      touchSelectionAnchorRef.current = {
+                        ...prevAnchor,
+                        isSingleWord: false,
+                      };
+                      setSelectedParaIdx(pIdx);
+                      setSelectedCharRange({
+                        paraIndex: pIdx,
+                        start: rangeStart,
+                        end: rangeEnd,
+                      });
+                      setSelectedText(cleanExtractedText(hit.fullText.slice(rangeStart, rangeEnd)));
+                      return;
+                    }
+
+                    // If selection was already active (same word tapped again, or a multi-word range was active), clear selection
+                    if (selectedText) {
+                      touchSelectionAnchorRef.current = null;
+                      setSelectedCharRange(null);
+                      setSelectedText('');
+                      setShowNoteInput(false);
+                      return;
+                    }
+
+                    // Tap 1 on a word: Select word & set anchor for optional Tap 2 range expansion
+                    touchSelectionAnchorRef.current = {
+                      paraIndex: pIdx,
+                      startChar: hit.startChar,
+                      endChar: hit.endChar,
+                      fullText: hit.fullText,
+                      isSingleWord: true,
+                    };
+                    setSelectedParaIdx(pIdx);
+                    setSelectedCharRange({
+                      paraIndex: pIdx,
+                      start: hit.startChar,
+                      end: hit.endChar,
+                    });
+                    setSelectedText(hit.word);
+                    return;
+                  }
+                }
+
+                if (selectedText && !window.getSelection()?.toString().trim()) {
+                  touchSelectionAnchorRef.current = null;
+                  setSelectedCharRange(null);
+                  setSelectedText('');
+                  setShowNoteInput(false);
+                }
+                return;
+              }
+
+              if (selectedText) {
+                touchSelectionAnchorRef.current = null;
+                setSelectedCharRange(null);
+                setSelectedText('');
+                setShowNoteInput(false);
+                return;
+              }
 
               if (settings.layoutMode !== 'scroll' && relX < 0.16) {
                 if (isBookRtl) handleNextPage();
@@ -2755,6 +3166,9 @@ export const UnifiedReaderView: React.FC = () => {
                 if (isBookRtl) handlePrevPage();
                 else handleNextPage();
               }
+            }}
+            style={{
+              touchAction: isTouchSelecting ? 'none' : 'pan-y',
             }}
             className="lumina-reader-surface flex-1 h-full overflow-y-auto px-3 sm:px-6 lg:px-10 py-5 sm:py-8 flex flex-col items-center select-text"
           >
@@ -2774,7 +3188,7 @@ export const UnifiedReaderView: React.FC = () => {
                   className={`grid grid-cols-2 rounded-2xl border shadow-xl overflow-hidden ${palette.elevatedBg} ${palette.borderHairline}`}
                 >
                   {/* Left Page Leaf (Page N) */}
-                  <div className="p-5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh]">
+                  <div className="p-3.5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh]">
                     <div>
                       <div
                         className={`flex items-center justify-between text-[11px] uppercase tracking-widest pb-3 mb-5 border-b ${palette.borderHairline} ${palette.textMuted}`}
@@ -2790,7 +3204,7 @@ export const UnifiedReaderView: React.FC = () => {
                       {currentPageIndex === 0 && (
                         <h2
                           dir="auto"
-                          className="font-display text-xl lg:text-2xl font-semibold mb-4"
+                          className="font-display text-lg sm:text-xl lg:text-2xl font-semibold mb-4"
                         >
                           {currentChapter.title}
                         </h2>
@@ -2803,7 +3217,7 @@ export const UnifiedReaderView: React.FC = () => {
                             settings.fontFamily === 'custom' && settings.customFontDataUrl
                               ? "'LuminaCustomUploadedFont', serif"
                               : undefined,
-                          fontSize: `${settings.fontSize}px`,
+                          fontSize: `${effectiveSpreadFontSize}px`,
                           lineHeight: settings.lineHeight,
                           letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
                           textAlign: isBookRtl ? 'right' : settings.textAlign,
@@ -2884,7 +3298,7 @@ export const UnifiedReaderView: React.FC = () => {
 
                   {/* Right Page Leaf (Page N + 1) with Realistic Center Book Spine Crease */}
                   <div
-                    className={`p-5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh] border-l relative ${palette.borderHairline}`}
+                    className={`p-3.5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh] border-l relative ${palette.borderHairline}`}
                   >
                     <div
                       aria-hidden="true"
@@ -2910,7 +3324,7 @@ export const UnifiedReaderView: React.FC = () => {
                               settings.fontFamily === 'custom' && settings.customFontDataUrl
                                 ? "'LuminaCustomUploadedFont', serif"
                                 : undefined,
-                            fontSize: `${settings.fontSize}px`,
+                            fontSize: `${effectiveSpreadFontSize}px`,
                             lineHeight: settings.lineHeight,
                             letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
                             textAlign: isBookRtl ? 'right' : settings.textAlign,

@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as pdfjsLib from 'pdfjs-dist';
 import Tesseract from 'tesseract.js';
 import {
+  ArrowLeft,
+  BookOpen,
   ChevronLeft,
   ChevronRight,
   ZoomIn,
@@ -16,6 +18,7 @@ import {
   Columns,
   Crop,
   Moon,
+  Sliders,
   X,
 } from 'lucide-react';
 import { db } from '../services/db';
@@ -271,6 +274,7 @@ interface VirtualizedPdfEngineProps {
   onWordLookup: (word: string, sentence: string) => void;
   onEditHighlight: (hl: Highlight) => void;
   onToggleImmersion?: () => void;
+  onOpenTypographyDrawer?: () => void;
 }
 
 export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
@@ -280,12 +284,14 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
   onWordLookup,
   onEditHighlight,
   onToggleImmersion,
+  onOpenTypographyDrawer,
 }) => {
   const settings = useLuminaStore((s) => s.settings);
   const highlights = useLuminaStore((s) => s.highlights);
   const activeBookContent = useLuminaStore((s) => s.activeBookContent);
   const activeJumpTarget = useLuminaStore((s) => s.activeJumpTarget);
   const setActiveJumpTarget = useLuminaStore((s) => s.setActiveJumpTarget);
+  const closeActiveBook = useLuminaStore((s) => s.closeActiveBook);
   const updateActiveLocator = useLuminaStore((s) => s.updateActiveLocator);
   const updateBookTotalLocations = useLuminaStore((s) => s.updateBookTotalLocations);
   const updateSettings = useLuminaStore((s) => s.updateSettings);
@@ -351,6 +357,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     yPx: number;
     downWordIndex: number | null;
     prevAnchorWordIndex: number | null;
+    prevFocusWordIndex: number | null;
     time: number;
     pointerType: string;
   } | null>(null);
@@ -376,7 +383,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
 
   const isSpreadRequested =
     settings.pdfSpreadMode === 'spread' || settings.layoutMode === 'double';
-  const isSpreadActive = isSpreadRequested && totalPages > 1;
+  const isSpreadActive = isSpreadRequested;
 
   // Saved vector ink strokes for the current page
   const pageInkStrokes = useMemo<PdfInkStroke[]>(() => {
@@ -1220,6 +1227,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
       yPx,
       downWordIndex: hitWordIdx,
       prevAnchorWordIndex: anchorWordIndex,
+      prevFocusWordIndex: focusWordIndex,
       time: Date.now(),
       pointerType: e.pointerType,
     };
@@ -1356,6 +1364,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         if (
           downInfo.downWordIndex !== null &&
           downInfo.prevAnchorWordIndex !== null &&
+          downInfo.prevFocusWordIndex === downInfo.prevAnchorWordIndex &&
           downInfo.downWordIndex !== downInfo.prevAnchorWordIndex
         ) {
           const start = Math.min(downInfo.prevAnchorWordIndex, downInfo.downWordIndex);
@@ -1375,12 +1384,32 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           }
         }
 
+        // If a multi-word range was already active and user taps stationary again, clear selection cleanly
+        if (
+          downInfo.prevAnchorWordIndex !== null &&
+          downInfo.prevFocusWordIndex !== null &&
+          downInfo.prevAnchorWordIndex !== downInfo.prevFocusWordIndex
+        ) {
+          setAnchorWordIndex(null);
+          setFocusWordIndex(null);
+          setRegionRectPx(null);
+          onSelectText('', currentPage);
+          return;
+        }
+
         // 2B. Long-Press or Touch Tap on a Word inside the page body -> Select that Word/Line!
         if (
           downInfo.downWordIndex !== null &&
           (elapsed >= 200 || (downInfo.pointerType === 'touch' && xPct > 14 && xPct < 86))
         ) {
           const hitIdx = downInfo.downWordIndex;
+          // If tapping the exact same single word again, toggle selection off
+          if (downInfo.prevAnchorWordIndex === hitIdx && downInfo.prevFocusWordIndex === hitIdx) {
+            setAnchorWordIndex(null);
+            setFocusWordIndex(null);
+            onSelectText('', currentPage);
+            return;
+          }
           const targetWord = wordBoxes.find((w) => w.wordIndex === hitIdx);
           if (targetWord) {
             setAnchorWordIndex(hitIdx);
@@ -1394,6 +1423,9 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         setAnchorWordIndex(null);
         setFocusWordIndex(null);
         setRegionRectPx(null);
+        if (hasActiveSelection) {
+          onSelectText('', currentPage);
+        }
 
         if (xPct <= 14 && currentPage > 1) {
           goToPage(currentPage - step);
@@ -1677,6 +1709,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               {/* Interactive Visual Page with Geometric Apple-Live-Text Word Selection, Ink & Swipe Page Turn */}
               <div
                 ref={pageWrapperRef}
+                data-pdf-interactive="true"
                 onContextMenu={(e) => {
                   // Prevent Android/iOS native system selection popup from overlapping Lumina's selection toolbar
                   e.preventDefault();
@@ -1873,7 +1906,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             </div>
 
             {/* Companion Right-Hand Page when 2-Page Spread Mode is Enabled on iPad / Tablet / Desktop */}
-            {isSpreadActive && currentPage < totalPages && (
+            {isSpreadActive && (
               <>
                 {/* Center Book Spine Crease */}
                 <div
@@ -1881,29 +1914,46 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
                   style={{ height: `${canvasCssSize.height}px` }}
                   className="w-1.5 sm:w-2 bg-gradient-to-r from-stone-400/40 via-stone-600/35 to-stone-400/40 shrink-0"
                 />
-                <div
-                  onContextMenu={(e) => e.preventDefault()}
-                  onClick={() => goToPage(currentPage + 1)}
-                  title={`Click to focus Page ${currentPage + 1} for word selection or notes`}
-                  style={{
-                    width: `${canvasCssSize.width}px`,
-                    height: `${canvasCssSize.height}px`,
-                  }}
-                  className="lumina-reader-surface relative rounded-r-lg overflow-hidden bg-white max-w-full shrink-0 cursor-pointer group"
-                >
-                  <canvas
-                    ref={secondCanvasRef}
+                {currentPage < totalPages ? (
+                  <div
+                    data-pdf-interactive="true"
+                    onContextMenu={(e) => e.preventDefault()}
+                    onClick={() => goToPage(currentPage + 1)}
+                    title={`Click to focus Page ${currentPage + 1} for word selection or notes`}
                     style={{
-                      filter: pdfCanvasFilterStyle,
-                      transform: settings.pdfAutoCropMargins ? 'scale(1.11)' : undefined,
-                      transformOrigin: 'center center',
+                      width: `${canvasCssSize.width}px`,
+                      height: `${canvasCssSize.height}px`,
                     }}
-                    className="block w-full h-full pointer-events-none transition-transform duration-200"
-                  />
-                  <div className="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-md bg-stone-900/75 text-white text-[11px] font-medium backdrop-blur-xs">
-                    Page {currentPage + 1} · Tap to Focus
+                    className="lumina-reader-surface relative rounded-r-lg overflow-hidden bg-white max-w-full shrink-0 cursor-pointer group"
+                  >
+                    <canvas
+                      ref={secondCanvasRef}
+                      style={{
+                        filter: pdfCanvasFilterStyle,
+                        transform: settings.pdfAutoCropMargins ? 'scale(1.11)' : undefined,
+                        transformOrigin: 'center center',
+                      }}
+                      className="block w-full h-full pointer-events-none transition-transform duration-200"
+                    />
+                    <div className="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-md bg-stone-900/75 text-white text-[11px] font-medium backdrop-blur-xs">
+                      Page {currentPage + 1} · Tap to Focus
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div
+                    style={{
+                      width: `${canvasCssSize.width}px`,
+                      height: `${canvasCssSize.height}px`,
+                    }}
+                    className={`lumina-reader-surface relative rounded-r-lg overflow-hidden max-w-full shrink-0 flex flex-col items-center justify-center p-6 text-center select-none ${palette.elevatedBg} ${palette.textMuted}`}
+                  >
+                    <BookOpen className="w-7 h-7 opacity-35 mb-2" />
+                    <div className="font-display text-sm font-semibold">{book.title}</div>
+                    <p className="text-xs font-literata italic mt-1">
+                      End of Document · Page {totalPages} of {totalPages}
+                    </p>
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -2022,6 +2072,28 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
       >
         <div className={`flex flex-wrap items-center gap-1.5 sm:gap-2.5 ${palette.textMuted}`}>
+          <button
+            type="button"
+            onClick={closeActiveBook}
+            className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
+            title="Back to Library"
+          >
+            <ArrowLeft className="w-3 h-3 text-amber-500" />
+            <span>Library</span>
+          </button>
+
+          {onOpenTypographyDrawer && (
+            <button
+              type="button"
+              onClick={onOpenTypographyDrawer}
+              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
+              title="Typography & Display Options"
+            >
+              <Sliders className="w-3 h-3 text-amber-500" />
+              <span>Aa</span>
+            </button>
+          )}
+
           <span>
             Page{' '}
             <strong>

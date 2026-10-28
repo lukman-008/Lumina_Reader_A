@@ -39,14 +39,16 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
   const isAndroidOrStandalone =
     typeof window !== 'undefined' &&
     (/Android/i.test(navigator.userAgent || '') ||
+      /Linux armv|Linux aarch64/i.test(navigator.platform || '') ||
       window.matchMedia?.('(display-mode: standalone)').matches ||
-      window.matchMedia?.('(display-mode: fullscreen)').matches);
+      window.matchMedia?.('(display-mode: fullscreen)').matches ||
+      (window.matchMedia?.('(pointer: coarse)').matches && window.innerWidth < 920));
 
   const safeTopPx =
     typeof settings.safeAreaTopOffset === 'number' && settings.safeAreaTopOffset > 0
       ? settings.safeAreaTopOffset
       : isAndroidOrStandalone
-      ? 28
+      ? 36
       : 0;
 
   return (
