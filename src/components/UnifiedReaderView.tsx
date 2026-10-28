@@ -26,6 +26,9 @@ import {
   Trash2,
   Edit3,
   Tag,
+  Copy,
+  Check,
+  ArrowUpDown,
 } from 'lucide-react';
 import { useLuminaStore } from '../store/useLuminaStore';
 import {
@@ -125,6 +128,36 @@ export const UnifiedReaderView: React.FC = () => {
   );
   const [marginNoteDraft, setMarginNoteDraft] = useState('');
   const [showNoteInput, setShowNoteInput] = useState(false);
+  const [copiedSelectionFeedback, setCopiedSelectionFeedback] = useState(false);
+
+  // Responsive Viewport Width & Android / Standalone Safe-Area Detection
+  const [viewportWidth, setViewportWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1024
+  );
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const isAndroidDevice =
+    typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
+  const isStandaloneDisplay =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(display-mode: standalone)').matches ||
+      window.matchMedia?.('(display-mode: fullscreen)').matches);
+
+  const safeTopPx =
+    typeof settings.safeAreaTopOffset === 'number' && settings.safeAreaTopOffset > 0
+      ? settings.safeAreaTopOffset
+      : isAndroidDevice || isStandaloneDisplay
+      ? 36
+      : 0;
+
+  // True 2-Page Book Spread is active whenever 2-Page Spread mode is selected
+  const isTwoPageSpreadActive = settings.layoutMode === 'double';
+  const isTouchActiveRef = useRef<boolean>(false);
 
   // Full-Screen Archival Figure Lightbox Modal State
   const [lightboxImage, setLightboxImage] = useState<{
@@ -262,10 +295,10 @@ export const UnifiedReaderView: React.FC = () => {
   }, [chapters, currentChapterIndex, activeBookMeta]);
 
   const wordsPerPage = useMemo(() => {
-    const baseWords = settings.layoutMode === 'double' ? 420 : 240;
+    const baseWords = 215;
     const scaleFactor = 19 / Math.max(14, settings.fontSize || 19);
-    return Math.max(90, Math.round(baseWords * scaleFactor));
-  }, [settings.layoutMode, settings.fontSize]);
+    return Math.max(85, Math.round(baseWords * scaleFactor));
+  }, [settings.fontSize]);
 
   const paginatedPages = useMemo(() => {
     const pages: { text: string; paraIndex: number }[][] = [];
@@ -289,11 +322,20 @@ export const UnifiedReaderView: React.FC = () => {
   }, [currentChapter, wordsPerPage]);
 
   const totalPagesInChapter = Math.max(1, paginatedPages.length);
-  const currentPageIndex = Math.min(
+  const rawPageIndex = Math.min(
     Math.max(0, activeBookMeta?.locator?.pageIndex || 0),
     totalPagesInChapter - 1
   );
+  // In 2-Page Spread mode on iPad/Desktop, align left-hand leaf to even page index (0, 2, 4...)
+  const currentPageIndex =
+    isTwoPageSpreadActive && rawPageIndex % 2 === 1
+      ? Math.max(0, rawPageIndex - 1)
+      : rawPageIndex;
   const currentPageParagraphs = paginatedPages[currentPageIndex] || [];
+  const rightSpreadPageParagraphs =
+    isTwoPageSpreadActive && currentPageIndex + 1 < totalPagesInChapter
+      ? paginatedPages[currentPageIndex + 1]
+      : null;
 
   const activeLocationNumber = useMemo(() => {
     if (!activeBookMeta) return 1;
@@ -534,10 +576,12 @@ export const UnifiedReaderView: React.FC = () => {
     );
   };
 
+  const pageStep = isTwoPageSpreadActive ? 2 : 1;
+
   const handlePrevPage = () => {
     if (currentPageIndex > 0) {
       triggerPageTurnAnimation('prev');
-      navigateToChapterAndPage(currentChapterIndex, currentPageIndex - 1);
+      navigateToChapterAndPage(currentChapterIndex, Math.max(0, currentPageIndex - pageStep));
     } else if (currentChapterIndex > 0) {
       triggerPageTurnAnimation('prev');
       navigateToChapterAndPage(currentChapterIndex - 1, 0);
@@ -545,9 +589,9 @@ export const UnifiedReaderView: React.FC = () => {
   };
 
   const handleNextPage = () => {
-    if (currentPageIndex < totalPagesInChapter - 1) {
+    if (currentPageIndex + pageStep < totalPagesInChapter) {
       triggerPageTurnAnimation('next');
-      navigateToChapterAndPage(currentChapterIndex, currentPageIndex + 1);
+      navigateToChapterAndPage(currentChapterIndex, currentPageIndex + pageStep);
     } else if (currentChapterIndex < chapters.length - 1) {
       triggerPageTurnAnimation('next');
       navigateToChapterAndPage(currentChapterIndex + 1, 0);
@@ -617,12 +661,24 @@ export const UnifiedReaderView: React.FC = () => {
         return;
       }
 
-      if (e.key === 'ArrowRight' || (e.key === ' ' && !e.shiftKey)) {
+      if (
+        e.key === 'ArrowRight' ||
+        e.key === 'PageDown' ||
+        e.key === 'AudioVolumeDown' ||
+        e.key === 'VolumeDown' ||
+        (e.key === ' ' && !e.shiftKey)
+      ) {
         if (settings.layoutMode !== 'scroll') {
           e.preventDefault();
           handleNextPage();
         }
-      } else if (e.key === 'ArrowLeft' || (e.key === ' ' && e.shiftKey)) {
+      } else if (
+        e.key === 'ArrowLeft' ||
+        e.key === 'PageUp' ||
+        e.key === 'AudioVolumeUp' ||
+        e.key === 'VolumeUp' ||
+        (e.key === ' ' && e.shiftKey)
+      ) {
         if (settings.layoutMode !== 'scroll') {
           e.preventDefault();
           handlePrevPage();
@@ -639,6 +695,51 @@ export const UnifiedReaderView: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   });
+
+  // Real-time selectionchange listener for Android/iOS long-press and handle dragging
+  useEffect(() => {
+    let settleTimer: number | null = null;
+    const onSelectionChange = () => {
+      if (activeBookMeta?.format === 'pdf') return;
+      const selObj = window.getSelection();
+      if (!selObj || selObj.rangeCount === 0) return;
+      const rawText = selObj.toString() || '';
+      const cleaned = cleanExtractedText(rawText);
+      if (cleaned.length < 2) return;
+
+      const anchorEl =
+        selObj.anchorNode instanceof HTMLElement
+          ? selObj.anchorNode
+          : selObj.anchorNode?.parentElement;
+      const paraEl = anchorEl?.closest?.('[data-para-index]');
+      if (!paraEl) return;
+
+      const pIdx = Number(paraEl.getAttribute('data-para-index'));
+      if (Number.isFinite(pIdx)) {
+        setSelectedParaIdx(pIdx);
+      }
+      setSelectedText(cleaned);
+
+      // On Android / touch devices, once the user lifts their finger, auto-collapse the native DOM range after 180ms
+      // so Android OS closes its intrusive "Copy / Share / Ask AI" popup while Lumina's Selection Bar stays open
+      if (settleTimer) window.clearTimeout(settleTimer);
+      if (!isTouchActiveRef.current && ('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
+        settleTimer = window.setTimeout(() => {
+          try {
+            window.getSelection()?.removeAllRanges();
+          } catch {
+            // ignore
+          }
+        }, 180);
+      }
+    };
+
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      if (settleTimer) window.clearTimeout(settleTimer);
+    };
+  }, [activeBookMeta?.format]);
 
   // Dismiss Floating Selection Bar cleanly on outside pointerdown without racing pointerup
   useEffect(() => {
@@ -947,6 +1048,27 @@ export const UnifiedReaderView: React.FC = () => {
         matchedSpans.push({
           start: spotSpan.start,
           end: spotSpan.end,
+          isSpotlightOnly: true,
+        });
+      }
+    }
+
+    // Visual Active Touch Selection Highlight (so collapsing native Android selection still shows exact selected text)
+    if (
+      selectedText &&
+      selectedText.trim().length >= 2 &&
+      selectedParaIdx === paraIndex
+    ) {
+      const activeSelSpan = findTextSpanInParagraph(text, selectedText);
+      if (
+        activeSelSpan &&
+        !matchedSpans.some(
+          (m) => !(activeSelSpan.end <= m.start || activeSelSpan.start >= m.end)
+        )
+      ) {
+        matchedSpans.push({
+          start: activeSelSpan.start,
+          end: activeSelSpan.end,
           isSpotlightOnly: true,
         });
       }
@@ -1645,7 +1767,7 @@ export const UnifiedReaderView: React.FC = () => {
             </div>
 
             <div className="space-y-2">
-              <label className="font-semibold block">Pagination & Spread</label>
+              <label className="font-semibold block">Pagination & Spread (Reflow & PDF)</label>
               <div className="grid grid-cols-3 gap-2">
                 {(
                   [
@@ -1657,7 +1779,12 @@ export const UnifiedReaderView: React.FC = () => {
                   <button
                     key={m.id}
                     type="button"
-                    onClick={() => updateSettings({ layoutMode: m.id })}
+                    onClick={() =>
+                      updateSettings({
+                        layoutMode: m.id,
+                        pdfSpreadMode: m.id === 'double' ? 'spread' : 'single',
+                      })
+                    }
                     className={`py-2 px-2 rounded-lg border text-center cursor-pointer ${
                       settings.layoutMode === m.id
                         ? `${palette.accentBg} text-white font-semibold`
@@ -1665,6 +1792,41 @@ export const UnifiedReaderView: React.FC = () => {
                     }`}
                   >
                     {m.label}
+                  </button>
+                ))}
+              </div>
+              {settings.layoutMode === 'double' && viewportWidth < 680 && (
+                <p className={`text-[11px] ${palette.textMuted}`}>
+                  Rotate device to landscape or view on iPad / Tablet / Desktop (`≥680px`) for side-by-side 2-page spread.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="font-semibold block">
+                  Android / Notch Top Status Bar Clearance
+                </label>
+                <span className={`tabular-nums ${palette.textMuted}`}>{safeTopPx}px</span>
+              </div>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { val: 0, label: 'Auto' },
+                  { val: 16, label: '16px' },
+                  { val: 28, label: '28px (Android)' },
+                  { val: 40, label: '40px (Cutout)' },
+                ].map((opt) => (
+                  <button
+                    key={opt.val}
+                    type="button"
+                    onClick={() => updateSettings({ safeAreaTopOffset: opt.val })}
+                    className={`py-1.5 px-1.5 rounded-lg border text-[11px] text-center cursor-pointer ${
+                      (settings.safeAreaTopOffset || 0) === opt.val
+                        ? `${palette.accentBg} text-white font-semibold`
+                        : `${palette.elevatedBg} ${palette.borderHairline}`
+                    }`}
+                  >
+                    {opt.label}
                   </button>
                 ))}
               </div>
@@ -1863,7 +2025,7 @@ export const UnifiedReaderView: React.FC = () => {
       onMouseMove={(e) => {
         if (settings.readingRuler) setRulerY(e.clientY);
       }}
-      className={`h-[100dvh] w-full flex flex-col relative overflow-hidden transition-colors duration-200 ${palette.canvasBg} ${palette.textPrimary}`}
+      className={`fixed inset-0 h-[100dvh] w-full flex flex-col overflow-hidden transition-colors duration-200 ${palette.canvasBg} ${palette.textPrimary}`}
     >
       {/* Circadian Warmth Overlay */}
       {settings.warmth > 0 && (
@@ -1888,17 +2050,20 @@ export const UnifiedReaderView: React.FC = () => {
         />
       )}
 
-      {/* Top Reader Utility Bar */}
+      {/* Top Reader Utility Bar (Protected from Android Notification Bar & Camera Cutouts) */}
       {!isZenMode ? (
         <header
-          className={`z-30 flex items-center justify-between gap-2 sm:gap-3 px-3 sm:px-6 py-2.5 sm:py-3 border-b shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
+          style={{
+            paddingTop: `max(0.625rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
+          }}
+          className={`z-30 flex items-center justify-between gap-2 sm:gap-3 px-3 sm:px-6 pb-2.5 sm:pb-3 border-b shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
         >
-          {/* Far-Left Pinned Back to Library Button (Never shrinks or clips on any screen size) */}
+          {/* Far-Left Pinned Back to Library Button (Minimum 40-44px Touch Hitbox, Never shrinks or clips) */}
           <button
             type="button"
             onClick={closeActiveBook}
             aria-label="Back to Library"
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0 ${palette.elevatedBg} ${palette.borderHairline} hover:border-amber-500/60`}
+            className={`min-h-[40px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0 ${palette.elevatedBg} ${palette.borderHairline} hover:border-amber-500/60`}
           >
             <ArrowLeft className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
             <span>Back to Library</span>
@@ -1916,10 +2081,31 @@ export const UnifiedReaderView: React.FC = () => {
 
           {/* Right: Reader Tool Drawers (Scrolls horizontally on small screens so Back button is never pushed off) */}
           <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto min-w-0 max-w-full py-0.5">
+            {/* Instant 1-Page / 2-Page Spread Switcher across all devices */}
+            <button
+              type="button"
+              onClick={() => {
+                const nextIsSpread = settings.layoutMode !== 'double';
+                void updateSettings({
+                  layoutMode: nextIsSpread ? 'double' : 'single',
+                  pdfSpreadMode: nextIsSpread ? 'spread' : 'single',
+                });
+              }}
+              className={`inline-flex min-h-[38px] sm:min-h-[36px] items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+                settings.layoutMode === 'double'
+                  ? `${palette.accentBg} text-white font-semibold`
+                  : `${palette.surfaceBg} ${palette.textSecondary}`
+              }`}
+              title="Toggle 2-Page Side-by-Side Book Spread"
+            >
+              <Columns className="w-3.5 h-3.5" />
+              <span>{settings.layoutMode === 'double' ? '2-Page Spread' : '1-Page'}</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setActiveDrawer(activeDrawer === 'toc' ? 'none' : 'toc')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'toc'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1933,7 +2119,7 @@ export const UnifiedReaderView: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveDrawer(activeDrawer === 'search' ? 'none' : 'search')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'search'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1947,7 +2133,7 @@ export const UnifiedReaderView: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveDrawer(activeDrawer === 'xray' ? 'none' : 'xray')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'xray'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1967,7 +2153,7 @@ export const UnifiedReaderView: React.FC = () => {
                   handleGenerateChapterSynthesis();
                 }
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'companion'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1983,7 +2169,7 @@ export const UnifiedReaderView: React.FC = () => {
               onClick={() =>
                 setActiveDrawer(activeDrawer === 'typography' ? 'none' : 'typography')
               }
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'typography'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -2006,7 +2192,7 @@ export const UnifiedReaderView: React.FC = () => {
                   ttsService.stop();
                 }
               }}
-              className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${
+              className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${
                 isTtsBarOpen
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -2022,7 +2208,7 @@ export const UnifiedReaderView: React.FC = () => {
                 setRsvpWordIndex(0);
                 setIsRsvpOpen(true);
               }}
-              className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
+              className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
               title="RSVP Speed Reader"
             >
               <Zap className="w-4 h-4" />
@@ -2040,7 +2226,7 @@ export const UnifiedReaderView: React.FC = () => {
                   snippet: (currentPageParagraphs[0]?.text || '').slice(0, 110),
                 })
               }
-              className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${
+              className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${
                 isCurrentLocationBookmarked
                   ? 'text-amber-500 bg-amber-500/10'
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -2055,7 +2241,7 @@ export const UnifiedReaderView: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsGestureGuideOpen(true)}
-              className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
+              className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
               title="Touch Gestures & Keyboard Shortcuts (?)"
             >
               <HelpCircle className="w-4 h-4" />
@@ -2064,7 +2250,7 @@ export const UnifiedReaderView: React.FC = () => {
             <button
               type="button"
               onClick={toggleZenMode}
-              className={`p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
+              className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${palette.surfaceBg} ${palette.textSecondary}`}
               title="Enter Distraction-Free Zen Mode (Z)"
             >
               <Maximize2 className="w-4 h-4" />
@@ -2072,11 +2258,16 @@ export const UnifiedReaderView: React.FC = () => {
           </div>
         </header>
       ) : (
-        <div className="fixed top-3 left-3 right-3 z-50 flex items-center justify-between pointer-events-none">
+        <div
+          style={{
+            top: `max(0.75rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
+          }}
+          className="fixed left-3 right-3 z-50 flex items-center justify-between pointer-events-none"
+        >
           <button
             type="button"
             onClick={closeActiveBook}
-            className={`pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-md opacity-85 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+            className={`min-h-[40px] pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-md opacity-90 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
           >
             <ArrowLeft className="w-3.5 h-3.5 text-amber-500" />
             <span>Back to Library</span>
@@ -2084,7 +2275,7 @@ export const UnifiedReaderView: React.FC = () => {
           <button
             type="button"
             onClick={toggleZenMode}
-            className={`pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border shadow-md opacity-85 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+            className={`min-h-[40px] pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border shadow-md opacity-90 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
           >
             <Minimize2 className="w-3.5 h-3.5" />
             <span>Exit Zen</span>
@@ -2148,25 +2339,117 @@ export const UnifiedReaderView: React.FC = () => {
         </div>
       )}
 
-      {/* Floating Selection Action Bar (Apple Books + Kindle Word Wise + Quote Card Studio) */}
+      {/* Floating Selection Action Bar (Engineered so Android Native System Popup Never Blocks Options) */}
       {selectedText && (
         <div
           ref={selectionBarRef}
-          className={`fixed bottom-16 sm:bottom-20 left-1/2 -translate-x-1/2 z-40 w-[94vw] max-w-xl rounded-2xl border p-3.5 shadow-2xl space-y-2.5 ${palette.elevatedBg} ${palette.borderHairline}`}
+          style={
+            settings.selectionBarPosition === 'top'
+              ? {
+                  top: `max(3.75rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx + 52}px))`,
+                }
+              : {
+                  bottom: `max(4rem, calc(env(safe-area-inset-bottom, 0px) + 3.75rem))`,
+                }
+          }
+          className={`fixed left-1/2 -translate-x-1/2 z-50 w-[95vw] max-w-xl rounded-2xl border p-3.5 shadow-2xl space-y-2.5 ${palette.elevatedBg} ${palette.borderHairline}`}
         >
-          {/* Selected Passage Preview + Cropped PDF Figure Snippet Preview */}
+          {/* Selected Passage Preview + Cropped PDF Figure Snippet Preview + Position Switcher */}
           <div
             dir="auto"
-            className={`text-xs font-literata italic px-2.5 py-1.5 rounded-lg border flex items-center gap-2.5 ${palette.surfaceBg} ${palette.borderHairline}`}
+            className={`text-xs font-literata italic px-2.5 py-1.5 rounded-lg border flex items-center justify-between gap-2.5 ${palette.surfaceBg} ${palette.borderHairline}`}
           >
-            {selectedPdfImageSnippet && (
-              <img
-                src={selectedPdfImageSnippet}
-                alt="PDF Figure Snippet"
-                className="w-12 h-10 object-contain rounded border border-black/10 bg-white shrink-0"
-              />
-            )}
-            <span className="line-clamp-2">"{selectedText}"</span>
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              {selectedPdfImageSnippet && (
+                <img
+                  src={selectedPdfImageSnippet}
+                  alt="PDF Figure Snippet"
+                  className="w-12 h-10 object-contain rounded border border-black/10 bg-white shrink-0"
+                />
+              )}
+              <span className="line-clamp-2">"{selectedText}"</span>
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0 font-sans not-italic">
+              {activeBookMeta.format !== 'pdf' &&
+                currentChapter.paragraphs[selectedParaIdx] &&
+                selectedText.length < currentChapter.paragraphs[selectedParaIdx].length && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const paraText = cleanExtractedText(
+                          currentChapter.paragraphs[selectedParaIdx] || ''
+                        );
+                        const idx = paraText.toLowerCase().indexOf(selectedText.toLowerCase());
+                        if (idx !== -1) {
+                          const after = paraText.slice(idx + selectedText.length);
+                          const nextWordsMatch = after.match(/^(\s*\S+){1,4}/);
+                          const expanded = (
+                            paraText.slice(idx, idx + selectedText.length) +
+                            (nextWordsMatch ? nextWordsMatch[0] : '')
+                          ).trim();
+                          if (expanded) setSelectedText(expanded);
+                        }
+                        window.getSelection()?.removeAllRanges();
+                      }}
+                      className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${palette.borderHairline}`}
+                      title="Extend selection by 4 words (No handles needed)"
+                    >
+                      +Words
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const paraText = cleanExtractedText(
+                          currentChapter.paragraphs[selectedParaIdx] || ''
+                        );
+                        const sentences =
+                          paraText.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [paraText];
+                        const matchSentence = sentences.find((s) =>
+                          s.toLowerCase().includes(selectedText.toLowerCase())
+                        );
+                        setSelectedText((matchSentence || paraText).trim());
+                        window.getSelection()?.removeAllRanges();
+                      }}
+                      className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${palette.borderHairline}`}
+                      title="Expand to Complete Sentence"
+                    >
+                      Sentence
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const fullPara = cleanExtractedText(
+                          currentChapter.paragraphs[selectedParaIdx] || ''
+                        );
+                        if (fullPara) setSelectedText(fullPara);
+                        window.getSelection()?.removeAllRanges();
+                      }}
+                      className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer ${palette.borderHairline}`}
+                      title="Select Full Paragraph"
+                    >
+                      Full Para
+                    </button>
+                  </>
+                )}
+
+              <button
+                type="button"
+                onClick={() =>
+                  updateSettings({
+                    selectionBarPosition:
+                      settings.selectionBarPosition === 'top' ? 'bottom' : 'top',
+                  })
+                }
+                className={`p-1 rounded border cursor-pointer ${palette.borderHairline}`}
+                title="Move Selection Toolbar Top / Bottom"
+              >
+                <ArrowUpDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -2178,21 +2461,43 @@ export const UnifiedReaderView: React.FC = () => {
                   key={color}
                   type="button"
                   onClick={() => handleCreateHighlight(color)}
-                  className={`w-5 h-5 rounded-full cursor-pointer transition-transform hover:scale-110 ${HIGHLIGHT_SWATCHES[color].dotClass}`}
+                  className={`w-6 h-6 sm:w-5 sm:h-5 rounded-full cursor-pointer transition-transform hover:scale-110 ${HIGHLIGHT_SWATCHES[color].dotClass}`}
                   title={HIGHLIGHT_SWATCHES[color].label}
                 />
               ))}
             </div>
 
-            {/* Word Wise, Quote Card, Margin Note & Close */}
-            <div className="flex items-center gap-1.5">
+            {/* Copy, Margin Note, Quote Card, Word Wise & Close */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(selectedText);
+                    setCopiedSelectionFeedback(true);
+                    window.setTimeout(() => setCopiedSelectionFeedback(false), 1400);
+                  } catch {
+                    // ignore clipboard permission fallback
+                  }
+                }}
+                className={`min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border cursor-pointer ${palette.borderHairline}`}
+                title="Copy Selected Text"
+              >
+                {copiedSelectionFeedback ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+                <span>{copiedSelectionFeedback ? 'Copied' : 'Copy'}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setShowNoteInput((v) => !v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border cursor-pointer ${palette.borderHairline}`}
+                className={`min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border cursor-pointer ${palette.borderHairline}`}
               >
                 <MessageSquare className="w-3.5 h-3.5" />
-                <span>Add Note</span>
+                <span>Note</span>
               </button>
 
               <button
@@ -2206,11 +2511,11 @@ export const UnifiedReaderView: React.FC = () => {
                         : `${currentChapter.title} · Loc ${activeLocationNumber}`,
                   })
                 }
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border cursor-pointer ${palette.borderHairline}`}
+                className={`min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border cursor-pointer ${palette.borderHairline}`}
                 title="Create Shareable Quote Card"
               >
                 <Share2 className="w-3.5 h-3.5" />
-                <span>Quote Card</span>
+                <span>Quote</span>
               </button>
 
               <button
@@ -2219,7 +2524,7 @@ export const UnifiedReaderView: React.FC = () => {
                   const firstWord = selectedText.trim().split(/\s+/)[0];
                   handleWordLookup(firstWord, selectedText);
                 }}
-                className={`px-2.5 py-1 rounded-md text-xs font-semibold text-white cursor-pointer ${palette.accentBg}`}
+                className={`min-h-[34px] px-2.5 py-1 rounded-md text-xs font-semibold text-white cursor-pointer ${palette.accentBg}`}
               >
                 Word Wise
               </button>
@@ -2232,9 +2537,9 @@ export const UnifiedReaderView: React.FC = () => {
                   setShowNoteInput(false);
                   window.getSelection()?.removeAllRanges();
                 }}
-                className={`p-1 cursor-pointer ${palette.textMuted}`}
+                className={`min-h-[34px] min-w-[34px] inline-flex items-center justify-center p-1 cursor-pointer ${palette.textMuted}`}
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -2248,12 +2553,12 @@ export const UnifiedReaderView: React.FC = () => {
                 onChange={(e) => setMarginNoteDraft(e.target.value)}
                 placeholder="Write a margin annotation for this passage..."
                 autoFocus
-                className={`flex-1 text-xs px-3 py-1.5 rounded-lg border outline-none ${palette.surfaceBg} ${palette.borderHairline}`}
+                className={`flex-1 text-xs px-3 py-2 rounded-lg border outline-none ${palette.surfaceBg} ${palette.borderHairline}`}
               />
               <button
                 type="button"
                 onClick={() => handleCreateHighlight('amber', marginNoteDraft)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold text-white cursor-pointer whitespace-nowrap shrink-0 ${palette.accentBg}`}
+                className={`px-3 py-2 rounded-lg text-xs font-semibold text-white cursor-pointer whitespace-nowrap shrink-0 ${palette.accentBg}`}
               >
                 Save Note
               </button>
@@ -2283,6 +2588,10 @@ export const UnifiedReaderView: React.FC = () => {
         ) : (
           /* Reflowable Reader Viewport */
           <main
+            onContextMenu={(e) => {
+              // Suppress Android / iOS native floating ActionMode / "Ask AI" contextmenu so Lumina's Selection Bar is never covered
+              e.preventDefault();
+            }}
             onWheel={(e) => {
               if (e.ctrlKey || e.metaKey) {
                 e.preventDefault();
@@ -2295,6 +2604,7 @@ export const UnifiedReaderView: React.FC = () => {
               }
             }}
             onTouchStart={(e) => {
+              isTouchActiveRef.current = true;
               if (e.touches.length === 2) {
                 const dx = e.touches[0].clientX - e.touches[1].clientX;
                 const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -2378,6 +2688,7 @@ export const UnifiedReaderView: React.FC = () => {
               }
             }}
             onTouchEnd={(e) => {
+              isTouchActiveRef.current = false;
               const g = touchGestureRef.current;
               touchGestureRef.current = null;
               setSwipeDeltaX(0);
@@ -2405,11 +2716,18 @@ export const UnifiedReaderView: React.FC = () => {
               }
 
               setTimeout(() => {
-                const sel = cleanExtractedText(window.getSelection()?.toString() || '');
+                const rawSelection = window.getSelection();
+                const sel = cleanExtractedText(rawSelection?.toString() || '');
                 if (sel.length > 1) {
                   setSelectedText(sel);
+                  // Collapse native DOM selection on touch devices after capturing so Android's native "Ask AI / Copy / Share" bar auto-dismisses
+                  try {
+                    rawSelection?.removeAllRanges();
+                  } catch {
+                    // ignore
+                  }
                 }
-              }, 80);
+              }, 120);
             }}
             onMouseUp={() => {
               const sel = cleanExtractedText(window.getSelection()?.toString() || '');
@@ -2438,116 +2756,358 @@ export const UnifiedReaderView: React.FC = () => {
                 else handleNextPage();
               }
             }}
-            className="flex-1 h-full overflow-y-auto px-4 sm:px-8 py-6 sm:py-12 flex flex-col items-center select-text"
+            className="lumina-reader-surface flex-1 h-full overflow-y-auto px-3 sm:px-6 lg:px-10 py-5 sm:py-8 flex flex-col items-center select-text"
           >
             <div
               dir={isBookRtl ? 'rtl' : 'auto'}
               className="w-full transition-all duration-200 ease-out"
               style={{
-                maxWidth: settings.layoutMode === 'double' ? '1120px' : '700px',
-                paddingLeft: `${Math.min(32, Math.max(8, Math.round(settings.marginWidth * 0.5)))}px`,
-                paddingRight: `${Math.min(32, Math.max(8, Math.round(settings.marginWidth * 0.5)))}px`,
+                maxWidth: isTwoPageSpreadActive ? '1220px' : '720px',
+                paddingLeft: `${Math.min(32, Math.max(8, Math.round(settings.marginWidth * 0.45)))}px`,
+                paddingRight: `${Math.min(32, Math.max(8, Math.round(settings.marginWidth * 0.45)))}px`,
                 transform: pageTransformStyle,
               }}
             >
-              {/* Chapter Header Kicker */}
-              <div className={`mb-6 sm:mb-8 pb-4 border-b ${palette.borderHairline}`}>
-                <div className={`text-xs uppercase tracking-widest ${palette.textMuted}`}>
-                  Chapter {currentChapterIndex + 1} of {Math.max(1, chapters.length)} · Page{' '}
-                  {currentPageIndex + 1} of {totalPagesInChapter}
-                </div>
-                <h2
-                  dir="auto"
-                  className="font-display text-xl sm:text-2xl lg:text-3xl font-semibold mt-1"
+              {isTwoPageSpreadActive ? (
+                /* True Side-by-Side 2-Page Book Spread for iPad (Portrait & Landscape), Tablets & Desktop */
+                <div
+                  className={`grid grid-cols-2 rounded-2xl border shadow-xl overflow-hidden ${palette.elevatedBg} ${palette.borderHairline}`}
                 >
-                  {currentChapter.title}
-                </h2>
-              </div>
-
-              {/* Prose Columns */}
-              <div
-                className={`${fontClass} ${
-                  settings.layoutMode === 'double'
-                    ? 'lg:columns-2 lg:gap-14 lg:[column-rule:1px_solid_rgba(120,113,108,0.18)]'
-                    : ''
-                } space-y-5 sm:space-y-6 pb-8`}
-                style={{
-                  fontFamily:
-                    settings.fontFamily === 'custom' && settings.customFontDataUrl
-                      ? "'LuminaCustomUploadedFont', serif"
-                      : undefined,
-                  fontSize: `${settings.fontSize}px`,
-                  lineHeight: settings.lineHeight,
-                  letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
-                  textAlign: isBookRtl ? 'right' : settings.textAlign,
-                }}
-              >
-                {(settings.layoutMode === 'scroll'
-                  ? currentChapter.paragraphs.map((text, idx) => ({ text, paraIndex: idx }))
-                  : currentPageParagraphs
-                ).map(({ text, paraIndex }, idx) => {
-                  // Archival EPUB Embedded Figure / Illustration Block (`[IMAGE_DATA:dataUrl|caption]`)
-                  if (text.startsWith('[IMAGE_DATA:')) {
-                    const inner = text.slice('[IMAGE_DATA:'.length, -1);
-                    const pipeIdx = inner.indexOf('|');
-                    const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
-                    const caption =
-                      pipeIdx !== -1 ? inner.slice(pipeIdx + 1) : 'Embedded Archival Figure';
-                    return (
-                      <figure
-                        key={paraIndex}
-                        data-para-index={paraIndex}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setLightboxImage({ src: dataUrl, caption });
-                        }}
-                        className={`break-inside-avoid-column my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in transition-transform hover:scale-[1.01] ${palette.surfaceBg} ${palette.borderHairline}`}
+                  {/* Left Page Leaf (Page N) */}
+                  <div className="p-5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh]">
+                    <div>
+                      <div
+                        className={`flex items-center justify-between text-[11px] uppercase tracking-widest pb-3 mb-5 border-b ${palette.borderHairline} ${palette.textMuted}`}
                       >
-                        <img
-                          src={dataUrl}
-                          alt={caption}
-                          className="max-h-80 mx-auto object-contain rounded-lg"
-                        />
-                        <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
-                          {caption} · <span className="underline">Click to Zoom</span>
-                        </figcaption>
-                      </figure>
-                    );
-                  }
+                        <span className="truncate max-w-[75%]">
+                          Ch. {currentChapterIndex + 1} · {currentChapter.title}
+                        </span>
+                        <span className="tabular-nums font-semibold shrink-0">
+                          Page {currentPageIndex + 1}
+                        </span>
+                      </div>
 
-                  const paraRtl = isRtlText(text);
-                  return (
-                    <p
-                      key={paraIndex}
-                      data-para-index={paraIndex}
-                      dir={paraRtl ? 'rtl' : 'auto'}
-                      onMouseUp={() => setSelectedParaIdx(paraIndex)}
-                      onTouchEnd={() => setSelectedParaIdx(paraIndex)}
-                      onClick={(e) => {
-                        if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
-                          e.stopPropagation();
-                          ttsService.speakText(text);
-                        }
-                      }}
-                      onDoubleClick={() => {
-                        const sel = window.getSelection()?.toString().trim();
-                        if (sel) handleWordLookup(sel, text);
-                      }}
-                      className={`break-inside-avoid-column leading-relaxed ${
-                        !paraRtl && idx === 0 && currentPageIndex === 0
-                          ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
-                          : ''
-                      } ${
-                        ttsSentence && text.includes(ttsSentence)
-                          ? 'bg-amber-500/15 rounded px-1'
-                          : ''
-                      } ${isTtsBarOpen ? 'cursor-pointer hover:bg-amber-500/5 rounded' : ''}`}
+                      {currentPageIndex === 0 && (
+                        <h2
+                          dir="auto"
+                          className="font-display text-xl lg:text-2xl font-semibold mb-4"
+                        >
+                          {currentChapter.title}
+                        </h2>
+                      )}
+
+                      <div
+                        className={`${fontClass} space-y-4 sm:space-y-5`}
+                        style={{
+                          fontFamily:
+                            settings.fontFamily === 'custom' && settings.customFontDataUrl
+                              ? "'LuminaCustomUploadedFont', serif"
+                              : undefined,
+                          fontSize: `${settings.fontSize}px`,
+                          lineHeight: settings.lineHeight,
+                          letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
+                          textAlign: isBookRtl ? 'right' : settings.textAlign,
+                        }}
+                      >
+                        {currentPageParagraphs.map(({ text, paraIndex }, idx) => {
+                          if (text.startsWith('[IMAGE_DATA:')) {
+                            const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                            const pipeIdx = inner.indexOf('|');
+                            const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                            const caption =
+                              pipeIdx !== -1 ? inner.slice(pipeIdx + 1) : 'Embedded Archival Figure';
+                            return (
+                              <figure
+                                key={paraIndex}
+                                data-para-index={paraIndex}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setLightboxImage({ src: dataUrl, caption });
+                                }}
+                                className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                              >
+                                <img
+                                  src={dataUrl}
+                                  alt={caption}
+                                  className="max-h-64 mx-auto object-contain rounded-lg"
+                                />
+                                <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                                  {caption}
+                                </figcaption>
+                              </figure>
+                            );
+                          }
+                          const paraRtl = isRtlText(text);
+                          return (
+                            <p
+                              key={paraIndex}
+                              data-para-index={paraIndex}
+                              dir={paraRtl ? 'rtl' : 'auto'}
+                              onMouseUp={() => setSelectedParaIdx(paraIndex)}
+                              onTouchEnd={() => setSelectedParaIdx(paraIndex)}
+                              onClick={(e) => {
+                                if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
+                                  e.stopPropagation();
+                                  ttsService.speakText(text);
+                                }
+                              }}
+                              onDoubleClick={() => {
+                                const sel = window.getSelection()?.toString().trim();
+                                if (sel) handleWordLookup(sel, text);
+                              }}
+                              className={`leading-relaxed ${
+                                !paraRtl && idx === 0 && currentPageIndex === 0
+                                  ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
+                                  : ''
+                              } ${
+                                ttsSentence && text.includes(ttsSentence)
+                                  ? 'bg-amber-500/15 rounded px-1'
+                                  : ''
+                              }`}
+                            >
+                              {renderParagraphContent(text, paraIndex)}
+                            </p>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div
+                      className={`pt-4 mt-6 border-t flex items-center justify-between text-[11px] tabular-nums ${palette.borderHairline} ${palette.textMuted}`}
                     >
-                      {renderParagraphContent(text, paraIndex)}
-                    </p>
-                  );
-                })}
-              </div>
+                      <span>Loc {activeLocationNumber}</span>
+                      <span>
+                        Page {currentPageIndex + 1} of {totalPagesInChapter}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right Page Leaf (Page N + 1) with Realistic Center Book Spine Crease */}
+                  <div
+                    className={`p-5 sm:p-7 lg:p-10 flex flex-col justify-between min-h-[68dvh] border-l relative ${palette.borderHairline}`}
+                  >
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-y-0 left-0 w-3 bg-gradient-to-r from-black/[0.06] to-transparent"
+                    />
+                    <div>
+                      <div
+                        className={`flex items-center justify-between text-[11px] uppercase tracking-widest pb-3 mb-5 border-b ${palette.borderHairline} ${palette.textMuted}`}
+                      >
+                        <span className="truncate max-w-[75%]">{activeBookMeta.title}</span>
+                        <span className="tabular-nums font-semibold shrink-0">
+                          {rightSpreadPageParagraphs
+                            ? `Page ${currentPageIndex + 2}`
+                            : 'End of Chapter'}
+                        </span>
+                      </div>
+
+                      {rightSpreadPageParagraphs ? (
+                        <div
+                          className={`${fontClass} space-y-4 sm:space-y-5`}
+                          style={{
+                            fontFamily:
+                              settings.fontFamily === 'custom' && settings.customFontDataUrl
+                                ? "'LuminaCustomUploadedFont', serif"
+                                : undefined,
+                            fontSize: `${settings.fontSize}px`,
+                            lineHeight: settings.lineHeight,
+                            letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
+                            textAlign: isBookRtl ? 'right' : settings.textAlign,
+                          }}
+                        >
+                          {rightSpreadPageParagraphs.map(({ text, paraIndex }) => {
+                            if (text.startsWith('[IMAGE_DATA:')) {
+                              const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                              const pipeIdx = inner.indexOf('|');
+                              const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                              const caption =
+                                pipeIdx !== -1
+                                  ? inner.slice(pipeIdx + 1)
+                                  : 'Embedded Archival Figure';
+                              return (
+                                <figure
+                                  key={paraIndex}
+                                  data-para-index={paraIndex}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLightboxImage({ src: dataUrl, caption });
+                                  }}
+                                  className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                                >
+                                  <img
+                                    src={dataUrl}
+                                    alt={caption}
+                                    className="max-h-64 mx-auto object-contain rounded-lg"
+                                  />
+                                  <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                                    {caption}
+                                  </figcaption>
+                                </figure>
+                              );
+                            }
+                            const paraRtl = isRtlText(text);
+                            return (
+                              <p
+                                key={paraIndex}
+                                data-para-index={paraIndex}
+                                dir={paraRtl ? 'rtl' : 'auto'}
+                                onMouseUp={() => setSelectedParaIdx(paraIndex)}
+                                onTouchEnd={() => setSelectedParaIdx(paraIndex)}
+                                onClick={(e) => {
+                                  if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
+                                    e.stopPropagation();
+                                    ttsService.speakText(text);
+                                  }
+                                }}
+                                onDoubleClick={() => {
+                                  const sel = window.getSelection()?.toString().trim();
+                                  if (sel) handleWordLookup(sel, text);
+                                }}
+                                className={`leading-relaxed ${
+                                  ttsSentence && text.includes(ttsSentence)
+                                    ? 'bg-amber-500/15 rounded px-1'
+                                    : ''
+                                }`}
+                              >
+                                {renderParagraphContent(text, paraIndex)}
+                              </p>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div
+                          className={`h-64 flex flex-col items-center justify-center text-center p-6 space-y-3 ${palette.textMuted}`}
+                        >
+                          <BookOpen className="w-6 h-6 opacity-40" />
+                          <p className="text-xs font-literata italic">
+                            End of {currentChapter.title}
+                          </p>
+                          {currentChapterIndex < chapters.length - 1 && (
+                            <button
+                              type="button"
+                              onClick={handleNextPage}
+                              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer ${palette.surfaceBg} ${palette.borderHairline} ${palette.textPrimary}`}
+                            >
+                              Continue to Chapter {currentChapterIndex + 2} →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div
+                      className={`pt-4 mt-6 border-t flex items-center justify-between text-[11px] tabular-nums ${palette.borderHairline} ${palette.textMuted}`}
+                    >
+                      <span>{activeBookMeta.locator.percentage}% Complete</span>
+                      <span>
+                        {rightSpreadPageParagraphs
+                          ? `Page ${currentPageIndex + 2} of ${totalPagesInChapter}`
+                          : `Ch. ${currentChapterIndex + 1} Colophon`}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* Single-Page or Continuous Scroll Editorial Layout */
+                <>
+                  {/* Chapter Header Kicker */}
+                  <div className={`mb-6 sm:mb-8 pb-4 border-b ${palette.borderHairline}`}>
+                    <div className={`text-xs uppercase tracking-widest ${palette.textMuted}`}>
+                      Chapter {currentChapterIndex + 1} of {Math.max(1, chapters.length)} · Page{' '}
+                      {currentPageIndex + 1} of {totalPagesInChapter}
+                    </div>
+                    <h2
+                      dir="auto"
+                      className="font-display text-xl sm:text-2xl lg:text-3xl font-semibold mt-1"
+                    >
+                      {currentChapter.title}
+                    </h2>
+                  </div>
+
+                  {/* Prose Stream */}
+                  <div
+                    className={`${fontClass} space-y-5 sm:space-y-6 pb-8`}
+                    style={{
+                      fontFamily:
+                        settings.fontFamily === 'custom' && settings.customFontDataUrl
+                          ? "'LuminaCustomUploadedFont', serif"
+                          : undefined,
+                      fontSize: `${settings.fontSize}px`,
+                      lineHeight: settings.lineHeight,
+                      letterSpacing: isBookRtl ? '0px' : `${settings.letterSpacing}px`,
+                      textAlign: isBookRtl ? 'right' : settings.textAlign,
+                    }}
+                  >
+                    {(settings.layoutMode === 'scroll'
+                      ? currentChapter.paragraphs.map((text, idx) => ({ text, paraIndex: idx }))
+                      : currentPageParagraphs
+                    ).map(({ text, paraIndex }, idx) => {
+                      if (text.startsWith('[IMAGE_DATA:')) {
+                        const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                        const pipeIdx = inner.indexOf('|');
+                        const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                        const caption =
+                          pipeIdx !== -1
+                            ? inner.slice(pipeIdx + 1)
+                            : 'Embedded Archival Figure';
+                        return (
+                          <figure
+                            key={paraIndex}
+                            data-para-index={paraIndex}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setLightboxImage({ src: dataUrl, caption });
+                            }}
+                            className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in transition-transform hover:scale-[1.01] ${palette.surfaceBg} ${palette.borderHairline}`}
+                          >
+                            <img
+                              src={dataUrl}
+                              alt={caption}
+                              className="max-h-80 mx-auto object-contain rounded-lg"
+                            />
+                            <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                              {caption} · <span className="underline">Click to Zoom</span>
+                            </figcaption>
+                          </figure>
+                        );
+                      }
+
+                      const paraRtl = isRtlText(text);
+                      return (
+                        <p
+                          key={paraIndex}
+                          data-para-index={paraIndex}
+                          dir={paraRtl ? 'rtl' : 'auto'}
+                          onMouseUp={() => setSelectedParaIdx(paraIndex)}
+                          onTouchEnd={() => setSelectedParaIdx(paraIndex)}
+                          onClick={(e) => {
+                            if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
+                              e.stopPropagation();
+                              ttsService.speakText(text);
+                            }
+                          }}
+                          onDoubleClick={() => {
+                            const sel = window.getSelection()?.toString().trim();
+                            if (sel) handleWordLookup(sel, text);
+                          }}
+                          className={`leading-relaxed ${
+                            !paraRtl && idx === 0 && currentPageIndex === 0
+                              ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
+                              : ''
+                          } ${
+                            ttsSentence && text.includes(ttsSentence)
+                              ? 'bg-amber-500/15 rounded px-1'
+                              : ''
+                          } ${isTtsBarOpen ? 'cursor-pointer hover:bg-amber-500/5 rounded' : ''}`}
+                        >
+                          {renderParagraphContent(text, paraIndex)}
+                        </p>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           </main>
         )}
@@ -2565,6 +3125,9 @@ export const UnifiedReaderView: React.FC = () => {
                   setActiveDrawer('none');
                 }
               }}
+              style={{
+                paddingTop: `max(0px, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
+              }}
               className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[1px] flex justify-end items-end sm:items-stretch animate-in fade-in duration-150"
             >
               {renderDrawerPanel()}
@@ -2572,27 +3135,58 @@ export const UnifiedReaderView: React.FC = () => {
           ))}
       </div>
 
-      {/* Bottom Kindle-Style Location Telemetry & Page Flip Scrubber */}
+      {/* Bottom Kindle-Style Location Telemetry & Page Flip Scrubber (With Mobile Thumb-Zone Back & Safe Area) */}
       {activeBookMeta.format !== 'pdf' && (
         <footer
-          className={`z-20 px-3 sm:px-6 py-2.5 border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
+          className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
         >
-          <div className={`flex flex-wrap items-center gap-2 sm:gap-3 ${palette.textMuted}`}>
+          <div className={`flex flex-wrap items-center gap-1.5 sm:gap-3 ${palette.textMuted}`}>
+            {/* Thumb-Zone Quick Library Back & Options Buttons on Phones */}
+            <button
+              type="button"
+              onClick={closeActiveBook}
+              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
+              title="Back to Library"
+            >
+              <ArrowLeft className="w-3 h-3 text-amber-500" />
+              <span>Library</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setActiveDrawer(activeDrawer === 'typography' ? 'none' : 'typography')
+              }
+              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
+              title="Typography & Display Options"
+            >
+              <Sliders className="w-3 h-3 text-amber-500" />
+              <span>Aa</span>
+            </button>
+
             <span>
               Loc <strong>{activeLocationNumber}</strong>/
               <strong>{activeBookMeta.totalLocations}</strong>
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              Pg {currentPageIndex + 1}/{totalPagesInChapter}
+              Pg{' '}
+              {isTwoPageSpreadActive && rightSpreadPageParagraphs
+                ? `${currentPageIndex + 1}–${currentPageIndex + 2}`
+                : currentPageIndex + 1}
+              /{totalPagesInChapter}
             </span>
             <span aria-hidden="true">·</span>
             <span>{activeBookMeta.locator.percentage}%</span>
             <span aria-hidden="true" className="hidden sm:inline">
               ·
             </span>
-            <span className="hidden sm:inline" title="Personalized Reading Speed & Chapter Time Estimator">
-              ~{personalizedReadingStats.minsLeftInChapter} min left in Ch. ({personalizedReadingStats.userWpm} WPM)
+            <span
+              className="hidden sm:inline"
+              title="Personalized Reading Speed & Chapter Time Estimator"
+            >
+              ~{personalizedReadingStats.minsLeftInChapter} min left in Ch. (
+              {personalizedReadingStats.userWpm} WPM)
             </span>
 
             {locationHistoryStack.length > 0 && (
@@ -2616,7 +3210,7 @@ export const UnifiedReaderView: React.FC = () => {
                 type="button"
                 onClick={handlePrevPage}
                 disabled={currentChapterIndex === 0 && currentPageIndex === 0}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
+                className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
               >
                 <ChevronLeft className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Prev</span>
@@ -2639,9 +3233,9 @@ export const UnifiedReaderView: React.FC = () => {
                 onClick={handleNextPage}
                 disabled={
                   currentChapterIndex >= chapters.length - 1 &&
-                  currentPageIndex >= totalPagesInChapter - 1
+                  currentPageIndex + pageStep >= totalPagesInChapter
                 }
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
+                className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
               >
                 <span className="hidden sm:inline">Next</span>
                 <ChevronRight className="w-3.5 h-3.5" />
@@ -3075,11 +3669,14 @@ export const UnifiedReaderView: React.FC = () => {
                 className={`p-3.5 rounded-xl border space-y-2 ${palette.surfaceBg} ${palette.borderHairline}`}
               >
                 <div className="font-semibold text-amber-600 dark:text-amber-400">
-                  Desktop & iPad Keyboard
+                  Desktop, E-Ink & iPad Keyboard
                 </div>
                 <ul className="space-y-1.5 leading-relaxed">
                   <li>
-                    <strong>← / → or Space:</strong> Previous / Next page
+                    <strong>← / →, PgUp / PgDn, or Space:</strong> Previous / Next page
+                  </li>
+                  <li>
+                    <strong>E-Ink Volume Up / Down:</strong> Hardware button page turning
                   </li>
                   <li>
                     <strong>/ or Cmd+F:</strong> Instant in-book & in-PDF full-text search

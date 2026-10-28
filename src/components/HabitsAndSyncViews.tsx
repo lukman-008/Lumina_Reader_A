@@ -380,6 +380,7 @@ export const SyncAndCrossPlatformView: React.FC = () => {
   const shelves = useLuminaStore((s) => s.shelves);
   const readingSessions = useLuminaStore((s) => s.readingSessions);
   const settings = useLuminaStore((s) => s.settings);
+  const updateSettings = useLuminaStore((s) => s.updateSettings);
   const hydrateApp = useLuminaStore((s) => s.hydrateApp);
 
   const palette = READING_THEMES[settings.theme] || READING_THEMES.paper;
@@ -452,11 +453,14 @@ export const SyncAndCrossPlatformView: React.FC = () => {
             await db.readingSessions.bulkPut(parsed.readingSessions);
         }
       );
+      if (parsed.settings && typeof parsed.settings === 'object') {
+        await updateSettings(parsed.settings);
+      }
       await hydrateApp();
       setStatusBanner(
-        `Restored ${parsed.booksMeta?.length || 0} volumes and ${
+        `Restored ${parsed.booksMeta?.length || 0} volumes, ${
           parsed.highlights?.length || 0
-        } annotations.`
+        } annotations, and reader preferences.`
       );
     } catch (err: any) {
       setStatusBanner(`Restore failed: ${err?.message || 'Invalid backup file'}`);
@@ -721,11 +725,39 @@ export const SyncAndCrossPlatformView: React.FC = () => {
 
         {activePlatformTab === 'eink' && (
           <div className="space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold">3. Android E-Ink Devices (Onyx Boox, Meebook, Kindle Fire)</h3>
-              <p className={`text-xs ${palette.textMuted}`}>
-                Lumina features dedicated optimizations for electrophoretic monochrome E-Ink displays.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">3. Android E-Ink Devices (Onyx Boox, Meebook, Kindle Fire)</h3>
+                <p className={`text-xs ${palette.textMuted}`}>
+                  Lumina features dedicated optimizations for electrophoretic monochrome E-Ink displays.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  await updateSettings({
+                    theme: 'eink',
+                    layoutMode: 'single',
+                    pageTurnAnimation: 'instant',
+                    warmth: 0,
+                  });
+                  setStatusBanner(
+                    'Activated Pure E-Ink Mode: Monochrome 1-bit theme, single-page pagination, and instant refresh.'
+                  );
+                }}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold cursor-pointer shrink-0 ${
+                  settings.theme === 'eink'
+                    ? 'bg-emerald-600 text-white'
+                    : `${palette.accentBg} text-white`
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>
+                  {settings.theme === 'eink'
+                    ? 'Pure E-Ink Preset Active'
+                    : 'Apply Pure E-Ink Preset Now'}
+                </span>
+              </button>
             </div>
 
             <div className={`grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs`}>
@@ -739,7 +771,7 @@ export const SyncAndCrossPlatformView: React.FC = () => {
               <div className={`p-4 rounded-xl border space-y-1.5 ${palette.surfaceBg} ${palette.borderHairline}`}>
                 <div className="font-semibold">Paginated Page Turn Mode</div>
                 <p className={palette.textMuted}>
-                  Eliminates continuous scrolling motion blur on 8Hz - 15Hz E-Ink panels.
+                  Eliminates continuous scrolling motion blur on 8Hz - 15Hz E-Ink panels with instant 1-bit page flips.
                 </p>
               </div>
 
@@ -975,11 +1007,7 @@ export const SyncAndCrossPlatformView: React.FC = () => {
             <div className="px-6 py-3.5 border-t border-current/10 flex items-center justify-between shrink-0">
               <button
                 type="button"
-                onClick={() => {
-                  const blob = new Blob([document.querySelector('meta[name="description"]')?.getAttribute('content') || ''], { type: 'text/markdown' });
-                  // Direct user to README
-                  setShowReadmeModal(false);
-                }}
+                onClick={() => setShowReadmeModal(false)}
                 className={`px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer ${palette.borderHairline}`}
               >
                 Close Manual

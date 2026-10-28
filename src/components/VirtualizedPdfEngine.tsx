@@ -350,12 +350,33 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     xPx: number;
     yPx: number;
     downWordIndex: number | null;
+    prevAnchorWordIndex: number | null;
     time: number;
     pointerType: string;
   } | null>(null);
   const pinchStartDistRef = useRef<number | null>(null);
   const pinchStartScaleRef = useRef<number>(1.0);
   const [swipeDeltaX, setSwipeDeltaX] = useState<number>(0);
+  const [containerMeasuredWidth, setContainerMeasuredWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1024
+  );
+
+  useEffect(() => {
+    const el = viewportContainerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.round(entry.contentRect.width);
+        if (w > 0) setContainerMeasuredWidth(w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const isSpreadRequested =
+    settings.pdfSpreadMode === 'spread' || settings.layoutMode === 'double';
+  const isSpreadActive = isSpreadRequested && totalPages > 1;
 
   // Saved vector ink strokes for the current page
   const pageInkStrokes = useMemo<PdfInkStroke[]>(() => {
@@ -609,11 +630,13 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         if (cancelled || !canvasRef.current) return;
 
         const baseViewport = page.getViewport({ scale: 1 });
-        const containerWidth = viewportContainerRef.current?.clientWidth
-          ? Math.max(260, viewportContainerRef.current.clientWidth - 28)
-          : 740;
+        const rawContainerW = viewportContainerRef.current?.clientWidth || containerMeasuredWidth || 740;
+        const containerWidth = Math.max(240, rawContainerW - 24);
+        const targetLeafWidth = isSpreadActive
+          ? Math.max(150, Math.floor((containerWidth - 16) / 2))
+          : containerWidth;
 
-        const fitScale = Math.min(1.45, containerWidth / Math.max(1, baseViewport.width));
+        const fitScale = Math.min(1.45, targetLeafWidth / Math.max(1, baseViewport.width));
         const effectiveScale = fitScale * scale;
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -847,11 +870,11 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         }
       }
     };
-  }, [pdfDoc, currentPage, scale, runAutomaticLiveText]);
+  }, [pdfDoc, currentPage, scale, isSpreadActive, containerMeasuredWidth, runAutomaticLiveText]);
 
-  // 3B. Render Companion Right-Hand Page when 2-Page Spread Mode (`settings.pdfSpreadMode === 'spread'`) is enabled
+  // 3B. Render Companion Right-Hand Page when 2-Page Spread Mode (`isSpreadActive`) is enabled
   useEffect(() => {
-    if (!pdfDoc || settings.pdfSpreadMode !== 'spread' || currentPage >= totalPages) return;
+    if (!pdfDoc || !isSpreadActive || currentPage >= totalPages) return;
     let cancelled = false;
 
     const renderCompanionSpreadPage = async () => {
@@ -903,7 +926,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         // ignore
       }
     };
-  }, [pdfDoc, currentPage, totalPages, settings.pdfSpreadMode, canvasCssSize.width, canvasCssSize.height]);
+  }, [pdfDoc, currentPage, totalPages, isSpreadActive, canvasCssSize.width, canvasCssSize.height]);
 
   // 4. Geometric Hit-Testing: Find the exact PageWordBox under/nearest to pointer (xPct, yPct)
   const findWordIndexAtPoint = useCallback(
@@ -1196,13 +1219,12 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
       xPx,
       yPx,
       downWordIndex: hitWordIdx,
+      prevAnchorWordIndex: anchorWordIndex,
       time: Date.now(),
       pointerType: e.pointerType,
     };
     setSwipeDeltaX(0);
     setIsPointerDragging(true);
-    setAnchorWordIndex(null);
-    setFocusWordIndex(null);
     setRegionStartPx(hitWordIdx === null ? { x: xPx, y: yPx } : null);
     setRegionRectPx(null);
   };
@@ -1249,13 +1271,11 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     }
 
     if (downInfo.downWordIndex !== null) {
-      if (anchorWordIndex === null) {
-        setAnchorWordIndex(downInfo.downWordIndex);
-      }
+      setAnchorWordIndex(downInfo.downWordIndex);
       const curIdx = findWordIndexAtPoint(xPct, yPct, 4.5);
       if (curIdx !== null) {
         setFocusWordIndex(curIdx);
-      } else if (focusWordIndex === null) {
+      } else {
         setFocusWordIndex(downInfo.downWordIndex);
       }
     } else if (regionStartPx) {
@@ -1268,7 +1288,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     }
   };
 
-  // Pointer Up: Handle Ink Stroke Save, Mobile Swipe Page-Turn, 3-Zone Edge Tap, or Finalize Word Selection
+  // Pointer Up: Handle Ink Stroke Save, Mobile Swipe Page-Turn, Two-Tap / Long-Press Word Selection, or Finalize Drag Selection
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isInkMode) {
       setIsPointerDragging(false);
@@ -1301,6 +1321,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
       const elapsed = Date.now() - downInfo.time;
       const bounds = pageWrapperRef.current.getBoundingClientRect();
       const xPct = ((e.clientX - bounds.left) / Math.max(1, bounds.width)) * 100;
+      const step = isSpreadActive ? 2 : 1;
 
       // 1. Fast Horizontal Swipe on Touch Devices -> Turn Page!
       if (
@@ -1314,15 +1335,15 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         setFocusWordIndex(null);
         setRegionRectPx(null);
         if (dx < 0 && currentPage < totalPages) {
-          goToPage(currentPage + 1);
+          goToPage(currentPage + step);
         } else if (dx > 0 && currentPage > 1) {
-          goToPage(currentPage - 1);
+          goToPage(currentPage - step);
         }
         return;
       }
 
-      // 2. Single Stationary Tap / Click (dist < 7px)
-      if (dist < 7) {
+      // 2. Stationary Tap or Long-Press (dist < 8px)
+      if (dist < 8) {
         if (downInfo.downWordIndex !== null && highlightedWordMap.has(downInfo.downWordIndex)) {
           const existingHl = highlightedWordMap.get(downInfo.downWordIndex)!;
           setAnchorWordIndex(null);
@@ -1331,14 +1352,53 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           return;
         }
 
+        // 2A. Two-Tap Range Selection on PDF (Tap Word 1, then Tap Word 2 to select whole range without dragging!)
+        if (
+          downInfo.downWordIndex !== null &&
+          downInfo.prevAnchorWordIndex !== null &&
+          downInfo.downWordIndex !== downInfo.prevAnchorWordIndex
+        ) {
+          const start = Math.min(downInfo.prevAnchorWordIndex, downInfo.downWordIndex);
+          const end = Math.max(downInfo.prevAnchorWordIndex, downInfo.downWordIndex);
+          setAnchorWordIndex(start);
+          setFocusWordIndex(end);
+          const selectedWords = wordBoxes.filter(
+            (w) => w.wordIndex >= start && w.wordIndex <= end
+          );
+          if (selectedWords.length > 0) {
+            const phrase = cleanExtractedText(selectedWords.map((w) => w.text).join(' '));
+            const rects = buildMergedLineRects(selectedWords);
+            if (phrase.length > 0) {
+              onSelectText(phrase, currentPage, rects);
+              return;
+            }
+          }
+        }
+
+        // 2B. Long-Press or Touch Tap on a Word inside the page body -> Select that Word/Line!
+        if (
+          downInfo.downWordIndex !== null &&
+          (elapsed >= 200 || (downInfo.pointerType === 'touch' && xPct > 14 && xPct < 86))
+        ) {
+          const hitIdx = downInfo.downWordIndex;
+          const targetWord = wordBoxes.find((w) => w.wordIndex === hitIdx);
+          if (targetWord) {
+            setAnchorWordIndex(hitIdx);
+            setFocusWordIndex(hitIdx);
+            const rects = buildMergedLineRects([targetWord]);
+            onSelectText(targetWord.text, currentPage, rects);
+            return;
+          }
+        }
+
         setAnchorWordIndex(null);
         setFocusWordIndex(null);
         setRegionRectPx(null);
 
         if (xPct <= 14 && currentPage > 1) {
-          goToPage(currentPage - 1);
+          goToPage(currentPage - step);
         } else if (xPct >= 86 && currentPage < totalPages) {
-          goToPage(currentPage + 1);
+          goToPage(currentPage + step);
         }
         return;
       }
@@ -1497,6 +1557,43 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
     });
   };
 
+  // Keyboard & Android E-Ink Hardware Volume Key Navigation for PDF Pages
+  useEffect(() => {
+    const onPdfKeyDown = (e: KeyboardEvent) => {
+      if (
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        document.activeElement?.tagName === 'SELECT'
+      ) {
+        return;
+      }
+      const step = isSpreadActive ? 2 : 1;
+      if (
+        e.key === 'ArrowRight' ||
+        e.key === 'PageDown' ||
+        e.key === 'AudioVolumeDown' ||
+        e.key === 'VolumeDown'
+      ) {
+        if (currentPage < totalPages) {
+          e.preventDefault();
+          goToPage(currentPage + step);
+        }
+      } else if (
+        e.key === 'ArrowLeft' ||
+        e.key === 'PageUp' ||
+        e.key === 'AudioVolumeUp' ||
+        e.key === 'VolumeUp'
+      ) {
+        if (currentPage > 1) {
+          e.preventDefault();
+          goToPage(currentPage - step);
+        }
+      }
+    };
+    window.addEventListener('keydown', onPdfKeyDown);
+    return () => window.removeEventListener('keydown', onPdfKeyDown);
+  });
+
   return (
     <div
       onWheel={handleWheel}
@@ -1570,35 +1667,49 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           </div>
         ) : (
           <>
-            <div className="flex flex-wrap xl:flex-nowrap items-start justify-center gap-4 max-w-full">
+            <div
+              className={`flex ${
+                isSpreadActive
+                  ? 'flex-nowrap items-start justify-center gap-0 rounded-xl shadow-2xl border border-black/15 overflow-hidden bg-white'
+                  : 'flex-wrap items-start justify-center gap-4'
+              } max-w-full`}
+            >
               {/* Interactive Visual Page with Geometric Apple-Live-Text Word Selection, Ink & Swipe Page Turn */}
               <div
-              ref={pageWrapperRef}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerCancel={() => {
-                setIsPointerDragging(false);
-                pointerDownInfoRef.current = null;
-                setSwipeDeltaX(0);
-                setActiveInkPoints([]);
-              }}
-              onDoubleClick={handleDoubleClick}
-              style={{
-                width: `${canvasCssSize.width}px`,
-                height: `${canvasCssSize.height}px`,
-                touchAction: isInkMode ? 'none' : 'pan-y',
-                transform: swipeDeltaX ? `translateX(${swipeDeltaX}px)` : undefined,
-                transition: swipeDeltaX ? 'none' : 'transform 180ms ease-out',
-              }}
-              className={`relative shadow-xl rounded-lg overflow-hidden border border-black/10 bg-white max-w-full shrink-0 select-none ${
-                isInkMode
-                  ? 'cursor-crosshair'
-                  : isHoveringWord || isPointerDragging
-                  ? 'cursor-text'
-                  : 'cursor-default'
-              }`}
-            >
+                ref={pageWrapperRef}
+                onContextMenu={(e) => {
+                  // Prevent Android/iOS native system selection popup from overlapping Lumina's selection toolbar
+                  e.preventDefault();
+                }}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={() => {
+                  setIsPointerDragging(false);
+                  pointerDownInfoRef.current = null;
+                  setSwipeDeltaX(0);
+                  setActiveInkPoints([]);
+                }}
+                onDoubleClick={handleDoubleClick}
+                style={{
+                  width: `${canvasCssSize.width}px`,
+                  height: `${canvasCssSize.height}px`,
+                  touchAction: isInkMode ? 'none' : 'pan-y',
+                  transform: swipeDeltaX ? `translateX(${swipeDeltaX}px)` : undefined,
+                  transition: swipeDeltaX ? 'none' : 'transform 180ms ease-out',
+                }}
+                className={`lumina-reader-surface relative overflow-hidden bg-white max-w-full shrink-0 select-none ${
+                  isSpreadActive
+                    ? 'rounded-l-lg'
+                    : 'shadow-xl rounded-lg border border-black/10'
+                } ${
+                  isInkMode
+                    ? 'cursor-crosshair'
+                    : isHoveringWord || isPointerDragging
+                    ? 'cursor-text'
+                    : 'cursor-default'
+                }`}
+              >
               {/* High-DPI Visual Page Canvas (Supports Smart Theme Filter & Auto-Crop Margins) */}
               <canvas
                 ref={canvasRef}
@@ -1761,30 +1872,39 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               </button>
             </div>
 
-            {/* Companion Right-Hand Page when 2-Page Spread Mode is Enabled on Desktop / iPad Landscape */}
-            {settings.pdfSpreadMode === 'spread' && currentPage < totalPages && (
-              <div
-                onClick={() => goToPage(currentPage + 1)}
-                title={`Click to focus Page ${currentPage + 1}`}
-                style={{
-                  width: `${canvasCssSize.width}px`,
-                  height: `${canvasCssSize.height}px`,
-                }}
-                className="hidden xl:block relative shadow-xl rounded-lg overflow-hidden border border-black/10 bg-white max-w-full shrink-0 cursor-pointer group"
-              >
-                <canvas
-                  ref={secondCanvasRef}
-                  style={{
-                    filter: pdfCanvasFilterStyle,
-                    transform: settings.pdfAutoCropMargins ? 'scale(1.11)' : undefined,
-                    transformOrigin: 'center center',
-                  }}
-                  className="block w-full h-full pointer-events-none transition-transform duration-200"
+            {/* Companion Right-Hand Page when 2-Page Spread Mode is Enabled on iPad / Tablet / Desktop */}
+            {isSpreadActive && currentPage < totalPages && (
+              <>
+                {/* Center Book Spine Crease */}
+                <div
+                  aria-hidden="true"
+                  style={{ height: `${canvasCssSize.height}px` }}
+                  className="w-1.5 sm:w-2 bg-gradient-to-r from-stone-400/40 via-stone-600/35 to-stone-400/40 shrink-0"
                 />
-                <div className="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-md bg-stone-900/70 text-white text-[11px] font-medium backdrop-blur-xs">
-                  Page {currentPage + 1} (Spread)
+                <div
+                  onContextMenu={(e) => e.preventDefault()}
+                  onClick={() => goToPage(currentPage + 1)}
+                  title={`Click to focus Page ${currentPage + 1} for word selection or notes`}
+                  style={{
+                    width: `${canvasCssSize.width}px`,
+                    height: `${canvasCssSize.height}px`,
+                  }}
+                  className="lumina-reader-surface relative rounded-r-lg overflow-hidden bg-white max-w-full shrink-0 cursor-pointer group"
+                >
+                  <canvas
+                    ref={secondCanvasRef}
+                    style={{
+                      filter: pdfCanvasFilterStyle,
+                      transform: settings.pdfAutoCropMargins ? 'scale(1.11)' : undefined,
+                      transformOrigin: 'center center',
+                    }}
+                    className="block w-full h-full pointer-events-none transition-transform duration-200"
+                  />
+                  <div className="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-md bg-stone-900/75 text-white text-[11px] font-medium backdrop-blur-xs">
+                    Page {currentPage + 1} · Tap to Focus
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -1899,11 +2019,17 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
 
       {/* Unified Bottom Page Scrubber, Ink/Crop/Filter Controls & Zoom Footer */}
       <footer
-        className={`z-20 px-3 sm:px-6 py-2.5 border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
+        className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
       >
         <div className={`flex flex-wrap items-center gap-1.5 sm:gap-2.5 ${palette.textMuted}`}>
           <span>
-            Page <strong>{currentPage}</strong> of <strong>{totalPages}</strong>
+            Page{' '}
+            <strong>
+              {isSpreadActive && currentPage < totalPages
+                ? `${currentPage}–${currentPage + 1}`
+                : currentPage}
+            </strong>{' '}
+            of <strong>{totalPages}</strong>
           </span>
           <span aria-hidden="true">·</span>
           <span>{Math.round((currentPage / Math.max(1, totalPages)) * 100)}%</span>
@@ -1913,7 +2039,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             <button
               type="button"
               onClick={() => setIsPageGridOpen(true)}
-              className={`p-1.5 rounded-md cursor-pointer ${palette.surfaceBg} ${palette.textSecondary}`}
+              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${palette.surfaceBg} ${palette.textSecondary}`}
               title="Page Thumbnail Grid"
             >
               <LayoutGrid className="w-3.5 h-3.5" />
@@ -1922,7 +2048,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             <button
               type="button"
               onClick={() => setIsInkMode((v) => !v)}
-              className={`p-1.5 rounded-md cursor-pointer ${
+              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
                 isInkMode
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1937,7 +2063,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
               onClick={() =>
                 updateSettings({ pdfAutoCropMargins: !settings.pdfAutoCropMargins })
               }
-              className={`p-1.5 rounded-md cursor-pointer ${
+              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
                 settings.pdfAutoCropMargins
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1950,7 +2076,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             <button
               type="button"
               onClick={() => updateSettings({ pdfThemeFilter: !settings.pdfThemeFilter })}
-              className={`p-1.5 rounded-md cursor-pointer ${
+              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
                 settings.pdfThemeFilter
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -1962,19 +2088,22 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
 
             <button
               type="button"
-              onClick={() =>
-                updateSettings({
-                  pdfSpreadMode: settings.pdfSpreadMode === 'spread' ? 'single' : 'spread',
-                })
-              }
-              className={`hidden xl:inline-flex p-1.5 rounded-md cursor-pointer ${
-                settings.pdfSpreadMode === 'spread'
-                  ? `${palette.accentBg} text-white`
+              onClick={() => {
+                const nextSpread = !isSpreadRequested;
+                void updateSettings({
+                  pdfSpreadMode: nextSpread ? 'spread' : 'single',
+                  layoutMode: nextSpread ? 'double' : 'single',
+                });
+              }}
+              className={`inline-flex min-h-[36px] items-center gap-1 px-2 py-1.5 rounded-md cursor-pointer ${
+                isSpreadRequested
+                  ? `${palette.accentBg} text-white font-semibold`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
               }`}
-              title="Toggle 2-Page Side-by-Side PDF Book Spread (iPad Landscape & Desktop)"
+              title="Toggle 2-Page Side-by-Side PDF Book Spread"
             >
               <Columns className="w-3.5 h-3.5" />
+              <span className="text-[11px]">2-Page</span>
             </button>
           </div>
 
@@ -1982,7 +2111,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             <button
               type="button"
               onClick={() => setScale((s) => Math.max(0.65, +(s - 0.15).toFixed(2)))}
-              className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
               title="Zoom Out"
             >
               <ZoomOut className="w-3.5 h-3.5" />
@@ -1993,7 +2122,7 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
             <button
               type="button"
               onClick={() => setScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
-              className="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
               title="Zoom In"
             >
               <ZoomIn className="w-3.5 h-3.5" />
@@ -2005,8 +2134,8 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           <button
             type="button"
             disabled={currentPage <= 1}
-            onClick={() => goToPage(currentPage - 1)}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
+            onClick={() => goToPage(currentPage - (isSpreadActive ? 2 : 1))}
+            className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
           >
             <ChevronLeft className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Prev</span>
@@ -2025,8 +2154,8 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           <button
             type="button"
             disabled={currentPage >= totalPages}
-            onClick={() => goToPage(currentPage + 1)}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
+            onClick={() => goToPage(currentPage + (isSpreadActive ? 2 : 1))}
+            className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
           >
             <span className="hidden sm:inline">Next</span>
             <ChevronRight className="w-3.5 h-3.5" />

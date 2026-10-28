@@ -1,6 +1,6 @@
 export type BookFormat = 'epub' | 'pdf' | 'txt' | 'md';
 
-export type ReadingTheme = 'paper' | 'studio' | 'sepia' | 'nocturne' | 'dusk';
+export type ReadingTheme = 'paper' | 'studio' | 'sepia' | 'nocturne' | 'dusk' | 'eink';
 
 export type FontFamilyChoice = 'literata' | 'merriweather' | 'sans' | 'dyslexic' | 'mono';
 
@@ -205,6 +205,8 @@ export interface ReaderSettings {
   pdfThemeFilter?: boolean;
   pdfAutoCropMargins?: boolean;
   pdfSpreadMode?: 'single' | 'spread';
+  safeAreaTopOffset?: number;
+  selectionBarPosition?: 'bottom' | 'top';
   dailyGoalMinutes?: number;
   yearlyBookGoal?: number;
   warmth: number;

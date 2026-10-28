@@ -86,6 +86,20 @@ export const READING_THEMES: Record<ReadingTheme, ThemePalette> = {
     accentText: 'text-[#10B981]',
     isDark: true,
   },
+  eink: {
+    name: 'Pure E-Ink',
+    subtitle: 'Monochrome 1-bit high-contrast panel',
+    canvasBg: 'bg-white',
+    surfaceBg: 'bg-[#FAFAFA]',
+    elevatedBg: 'bg-white',
+    textPrimary: 'text-black',
+    textSecondary: 'text-[#171717]',
+    textMuted: 'text-[#404040]',
+    borderHairline: 'border-black/35',
+    accentBg: 'bg-black',
+    accentText: 'text-black',
+    isDark: false,
+  },
 };
 
 export const FONT_FAMILY_CLASSES: Record<FontFamilyChoice, { label: string; className: string }> = {

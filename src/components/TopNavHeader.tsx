@@ -32,20 +32,37 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
   const activeTab = useLuminaStore((s) => s.activeTab);
   const setActiveTab = useLuminaStore((s) => s.setActiveTab);
   const setImporterOpen = useLuminaStore((s) => s.setImporterOpen);
-  const theme = useLuminaStore((s) => s.settings.theme);
+  const settings = useLuminaStore((s) => s.settings);
+  const theme = settings.theme;
   const palette = READING_THEMES[theme] || READING_THEMES.paper;
+
+  const isAndroidOrStandalone =
+    typeof window !== 'undefined' &&
+    (/Android/i.test(navigator.userAgent || '') ||
+      window.matchMedia?.('(display-mode: standalone)').matches ||
+      window.matchMedia?.('(display-mode: fullscreen)').matches);
+
+  const safeTopPx =
+    typeof settings.safeAreaTopOffset === 'number' && settings.safeAreaTopOffset > 0
+      ? settings.safeAreaTopOffset
+      : isAndroidOrStandalone
+      ? 28
+      : 0;
 
   return (
     <>
       {/* Top Header: 3-Zone Editorial Bar on iPad/Desktop, Clean Brand + Action Bar on iPhone/Android */}
       <header
-        className={`sticky top-0 z-30 flex items-center justify-between gap-4 px-4 sm:px-6 py-3.5 border-b transition-colors duration-200 ${palette.canvasBg} ${palette.borderHairline}`}
+        style={{
+          paddingTop: `max(0.875rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
+        }}
+        className={`sticky top-0 z-30 flex items-center justify-between gap-4 px-4 sm:px-6 pb-3.5 border-b transition-colors duration-200 ${palette.canvasBg} ${palette.borderHairline}`}
       >
         {/* Zone 1: Wordmark */}
         <button
           type="button"
           onClick={() => setActiveTab('library')}
-          className={`text-lg sm:text-xl font-bold tracking-tight font-display whitespace-nowrap shrink-0 cursor-pointer text-left ${palette.textPrimary}`}
+          className={`min-h-[44px] inline-flex items-center text-lg sm:text-xl font-bold tracking-tight font-display whitespace-nowrap shrink-0 cursor-pointer text-left ${palette.textPrimary}`}
         >
           Lumina Reader
         </button>
@@ -62,7 +79,7 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`text-sm font-medium transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
+                className={`min-h-[40px] inline-flex items-center text-sm font-medium transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 cursor-pointer ${
                   isActive
                     ? `${palette.textPrimary} border-current font-semibold`
                     : `${palette.textMuted} border-transparent hover:${palette.textPrimary}`
@@ -81,9 +98,9 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
               type="button"
               onClick={onOpenCommandPalette}
               title="Global Syntopicon Search & Command Palette (Cmd+K / Ctrl+K)"
-              className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors ${palette.elevatedBg} ${palette.borderHairline} ${palette.textSecondary}`}
+              className={`min-h-[44px] sm:min-h-[38px] inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors ${palette.elevatedBg} ${palette.borderHairline} ${palette.textSecondary}`}
             >
-              <Search className="w-3.5 h-3.5 text-amber-500" />
+              <Search className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-amber-500" />
               <span className="hidden sm:inline">Syntopicon Search</span>
               <kbd className="hidden lg:inline-block px-1.5 py-0.5 text-[10px] font-mono-reader rounded border border-current/20 opacity-75">
                 ⌘K
@@ -94,7 +111,7 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
           <button
             type="button"
             onClick={() => setImporterOpen(true)}
-            className={`inline-flex items-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-xs hover:opacity-90 transition-opacity whitespace-nowrap shrink-0 cursor-pointer ${palette.accentBg}`}
+            className={`min-h-[44px] sm:min-h-[38px] inline-flex items-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-xs hover:opacity-90 transition-opacity whitespace-nowrap shrink-0 cursor-pointer ${palette.accentBg}`}
           >
             <Upload className="w-3.5 h-3.5" />
             <span>Import Books</span>
@@ -105,7 +122,7 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
       {/* Thumb-Friendly Mobile Bottom Tab Bar (iPhone & Android Ergonomics, Hidden on iPad/Desktop) */}
       <nav
         aria-label="Mobile Bottom Navigation"
-        className={`md:hidden fixed bottom-0 left-0 right-0 z-30 border-t px-2 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] grid grid-cols-5 gap-1 backdrop-blur-md ${palette.surfaceBg} ${palette.borderHairline}`}
+        className={`md:hidden fixed bottom-0 left-0 right-0 z-30 border-t px-2 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] grid grid-cols-5 gap-1 backdrop-blur-md ${palette.surfaceBg} ${palette.borderHairline}`}
       >
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
@@ -115,7 +132,7 @@ export const TopNavHeader: React.FC<TopNavHeaderProps> = ({ onOpenCommandPalette
               key={item.id}
               type="button"
               onClick={() => setActiveTab(item.id)}
-              className={`flex flex-col items-center justify-center py-1 rounded-lg transition-colors cursor-pointer ${
+              className={`min-h-[48px] flex flex-col items-center justify-center py-1 rounded-lg transition-colors cursor-pointer ${
                 isActive ? `${palette.accentText} font-semibold` : palette.textMuted
               }`}
             >

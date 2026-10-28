@@ -65,41 +65,36 @@ Inside the project root:
 npm install @capacitor/core @capacitor/cli @capacitor/android
 ```
 
-### Step 3.2: Initialize Capacitor Configuration
-Run the Capacitor initializer:
-```bash
-npx cap init "Lumina Reader" "com.luminareader.app" --web-dir dist
-```
+### Step 3.2: Verify Capacitor Configuration (`capacitor.config.json`)
+This repository already includes a preconfigured `/capacitor.config.json` at the root directory (or you can regenerate it via `npx cap init "Lumina Reader" "com.luminareader.app" --web-dir dist`):
 
-This creates `capacitor.config.ts`. Update `capacitor.config.ts` to enable file access, hardware acceleration, and full-screen immersive mode:
-
-```typescript
-import type { CapacitorConfig } from '@capacitor/cli';
-
-const config: CapacitorConfig = {
-  appId: 'com.luminareader.app',
-  appName: 'Lumina Reader',
-  webDir: 'dist',
-  server: {
-    androidScheme: 'https',
-    cleartext: false
+```json
+{
+  "appId": "com.luminareader.app",
+  "appName": "Lumina Reader",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": false
   },
-  android: {
-    allowMixedContent: false,
-    captureInput: true,
-    webContentsDebuggingEnabled: process.env.NODE_ENV !== 'production'
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
   },
-  plugins: {
-    CapacitorCookies: {
-      enabled: true,
+  "ios": {
+    "contentInset": "always",
+    "allowsLinkPreview": false
+  },
+  "plugins": {
+    "CapacitorCookies": {
+      "enabled": true
     },
-    CapacitorHttp: {
-      enabled: true,
+    "CapacitorHttp": {
+      "enabled": true
     }
   }
-};
-
-export default config;
+}
 ```
 
 ### Step 3.3: Build Web Assets and Add Android Native Project

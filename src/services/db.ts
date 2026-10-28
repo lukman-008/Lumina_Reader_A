@@ -67,6 +67,8 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   pdfThemeFilter: false,
   pdfAutoCropMargins: false,
   pdfSpreadMode: 'single',
+  safeAreaTopOffset: 0,
+  selectionBarPosition: 'bottom',
   dailyGoalMinutes: 30,
   yearlyBookGoal: 24,
   warmth: 0,
