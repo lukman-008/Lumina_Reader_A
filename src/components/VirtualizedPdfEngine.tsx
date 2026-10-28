@@ -1397,10 +1397,10 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
           return;
         }
 
-        // 2B. Long-Press or Touch Tap on a Word inside the page body -> Select that Word/Line!
+        // 2B. Long-Press or Tap on a Word inside the center page body -> Select that Word/Line!
         if (
           downInfo.downWordIndex !== null &&
-          (elapsed >= 200 || (downInfo.pointerType === 'touch' && xPct > 14 && xPct < 86))
+          (elapsed >= 200 || (xPct > 14 && xPct < 86))
         ) {
           const hitIdx = downInfo.downWordIndex;
           // If tapping the exact same single word again, toggle selection off

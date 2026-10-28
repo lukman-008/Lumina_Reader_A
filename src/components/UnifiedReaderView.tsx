@@ -612,7 +612,31 @@ export const UnifiedReaderView: React.FC = () => {
       navigateToChapterAndPage(currentChapterIndex, Math.max(0, currentPageIndex - pageStep));
     } else if (currentChapterIndex > 0) {
       triggerPageTurnAnimation('prev');
-      navigateToChapterAndPage(currentChapterIndex - 1, 0);
+      const prevCh = chapters[currentChapterIndex - 1];
+      let prevPageCount = 1;
+      if (prevCh?.paragraphs?.length) {
+        let buckets = 0;
+        let currentLen = 0;
+        let count = 0;
+        prevCh.paragraphs.forEach((p) => {
+          if (!p) return;
+          const wCount = p.split(/\s+/).length;
+          if (count + wCount > wordsPerPage && currentLen > 0) {
+            buckets += 1;
+            currentLen = 1;
+            count = wCount;
+          } else {
+            currentLen += 1;
+            count += wCount;
+          }
+        });
+        if (currentLen > 0) buckets += 1;
+        prevPageCount = Math.max(1, buckets);
+      }
+      const rawLastIdx = Math.max(0, prevPageCount - 1);
+      const targetLastIdx =
+        isTwoPageSpreadActive && rawLastIdx % 2 === 1 ? Math.max(0, rawLastIdx - 1) : rawLastIdx;
+      navigateToChapterAndPage(currentChapterIndex - 1, targetLastIdx);
     }
   };
 
@@ -867,12 +891,8 @@ export const UnifiedReaderView: React.FC = () => {
       }
       setSelectedText(cleaned);
 
-      // On any touch device, immediately collapse native DOM range so Android OS never shows its "Ask AI / Copy" popup
-      if (
-        isTouchActiveRef.current ||
-        window.matchMedia?.('(pointer: coarse)').matches ||
-        navigator.maxTouchPoints > 0
-      ) {
+      // On active touch gestures or coarse-pointer mobile devices, immediately collapse native DOM range so Android OS never shows its "Ask AI / Copy" popup
+      if (isTouchActiveRef.current || window.matchMedia?.('(pointer: coarse)').matches) {
         try {
           selObj.removeAllRanges();
         } catch {
@@ -989,12 +1009,17 @@ export const UnifiedReaderView: React.FC = () => {
       );
     }
 
+    const alignedResolvedPageIdx =
+      isTwoPageSpreadActive && resolvedPageIdx >= 0 && resolvedPageIdx % 2 === 1
+        ? Math.max(0, resolvedPageIdx - 1)
+        : resolvedPageIdx;
+
     if (
       settings.layoutMode !== 'scroll' &&
-      resolvedPageIdx !== -1 &&
-      resolvedPageIdx !== currentPageIndex
+      alignedResolvedPageIdx !== -1 &&
+      alignedResolvedPageIdx !== currentPageIndex
     ) {
-      navigateToChapterAndPage(targetChIdx, resolvedPageIdx, false);
+      navigateToChapterAndPage(targetChIdx, alignedResolvedPageIdx, false);
       return;
     }
 
@@ -1013,6 +1038,7 @@ export const UnifiedReaderView: React.FC = () => {
     highlights,
     chapters.length,
     settings.layoutMode,
+    isTwoPageSpreadActive,
   ]);
 
   // Smoothly scroll spotlighted highlight or passage into center of viewport
@@ -2353,9 +2379,11 @@ export const UnifiedReaderView: React.FC = () => {
               onClick={() => {
                 setIsTtsBarOpen((v) => !v);
                 if (!isTtsBarOpen) {
-                  ttsService.speakText(
-                    currentPageParagraphs.map((p) => p.text).join(' ')
-                  );
+                  const spreadParas = [
+                    ...currentPageParagraphs,
+                    ...(rightSpreadPageParagraphs || []),
+                  ].filter((p) => !p.text.startsWith('[IMAGE_DATA:'));
+                  ttsService.speakText(spreadParas.map((p) => p.text).join(' '));
                 } else {
                   ttsService.stop();
                 }
@@ -3059,6 +3087,7 @@ export const UnifiedReaderView: React.FC = () => {
             onMouseUp={() => {
               const sel = cleanExtractedText(window.getSelection()?.toString() || '');
               if (sel.length > 1) {
+                justFinishedTouchSelectRef.current = Date.now();
                 setSelectedCharRange(null);
                 setSelectedText(sel);
               }
@@ -3076,15 +3105,14 @@ export const UnifiedReaderView: React.FC = () => {
               const rect = e.currentTarget.getBoundingClientRect();
               const relX = (e.clientX - rect.left) / Math.max(1, rect.width);
 
-              // Center reading zone (16%..84%): Support Tap-a-Word & Two-Tap Range Selection on Touch Devices
+              // Center reading zone (16%..84%): Support Tap-a-Word & Two-Tap Range Selection on Touch & Desktop
               if (relX >= 0.16 && relX <= 0.84) {
-                const isTouchEnv =
-                  window.matchMedia?.('(pointer: coarse)').matches ||
-                  'ontouchstart' in window ||
-                  navigator.maxTouchPoints > 0;
                 const paraEl = target.closest?.('p[data-para-index]') as HTMLElement | null;
+                const activeNativeSel = cleanExtractedText(
+                  window.getSelection()?.toString() || ''
+                );
 
-                if (isTouchEnv && paraEl && !isTtsBarOpen) {
+                if (paraEl && !isTtsBarOpen && activeNativeSel.length <= 1) {
                   const pIdx = Number(paraEl.getAttribute('data-para-index'));
                   const hit = findWordAtPointInParagraph(paraEl, e.clientX, e.clientY);
                   const prevAnchor = touchSelectionAnchorRef.current;
