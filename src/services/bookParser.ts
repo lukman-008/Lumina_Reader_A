@@ -23,11 +23,24 @@ const COVER_GRADIENTS = [
 export async function initializeLibraryCatalog(): Promise<BookMeta[]> {
   try {
     const existing = await db.booksMeta.orderBy('addedAt').reverse().toArray();
+    const { metas, contents } = getSeedLibraryData();
     if (existing.length > 0) {
+      // Ensure pre-seeded classic volumes have the expanded multi-page chapter contents
+      await db.transaction('rw', db.booksMeta, db.bookContents, async () => {
+        for (const seedContent of contents) {
+          const cached = await db.bookContents.get(seedContent.bookId);
+          if (
+            !cached ||
+            (cached.chapters[0]?.paragraphs?.length || 0) <
+              (seedContent.chapters[0]?.paragraphs?.length || 0)
+          ) {
+            await db.bookContents.put(seedContent);
+          }
+        }
+      });
       return existing;
     }
 
-    const { metas, contents } = getSeedLibraryData();
     await db.transaction('rw', db.booksMeta, db.bookContents, async () => {
       await db.booksMeta.bulkPut(metas);
       await db.bookContents.bulkPut(contents);

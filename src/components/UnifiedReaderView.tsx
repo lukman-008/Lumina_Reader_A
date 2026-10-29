@@ -178,6 +178,8 @@ export const UnifiedReaderView: React.FC = () => {
   const isTouchSelectingRef = useRef<boolean>(false);
   const longPressTimerRef = useRef<number | null>(null);
   const justFinishedTouchSelectRef = useRef<number>(0);
+  const lastPageTurnTimeRef = useRef<number>(0);
+  const lastTouchMoveTimeRef = useRef<number>(0);
   const touchSelectionAnchorRef = useRef<{
     paraIndex: number;
     startChar: number;
@@ -323,31 +325,122 @@ export const UnifiedReaderView: React.FC = () => {
   }, [chapters, currentChapterIndex, activeBookMeta]);
 
   const wordsPerPage = useMemo(() => {
-    const baseWords = isTwoPageSpreadActive ? 145 : 215;
+    const baseWords = isTwoPageSpreadActive
+      ? viewportWidth < 768
+        ? 85
+        : 120
+      : viewportWidth < 640
+      ? 92
+      : viewportWidth < 1024
+      ? 130
+      : 155;
     const scaleFactor = 19 / Math.max(14, settings.fontSize || 19);
-    return Math.max(75, Math.round(baseWords * scaleFactor));
-  }, [settings.fontSize, isTwoPageSpreadActive]);
+    return Math.max(55, Math.round(baseWords * scaleFactor));
+  }, [settings.fontSize, isTwoPageSpreadActive, viewportWidth]);
 
-  const paginatedPages = useMemo(() => {
-    const pages: { text: string; paraIndex: number }[][] = [];
-    let currentBucket: { text: string; paraIndex: number }[] = [];
+  const buildPaginatedChapterPages = (
+    paragraphs: string[],
+    fallbackContent: string,
+    targetWordsPerPage: number
+  ): { text: string; paraIndex: number; sliceStartOffset: number }[][] => {
+    const pages: { text: string; paraIndex: number; sliceStartOffset: number }[][] = [];
+    let currentBucket: { text: string; paraIndex: number; sliceStartOffset: number }[] = [];
     let count = 0;
 
-    (currentChapter.paragraphs || []).forEach((p, idx) => {
+    (paragraphs || []).forEach((p, idx) => {
       if (!p) return;
-      const wCount = p.split(/\s+/).length;
-      if (count + wCount > wordsPerPage && currentBucket.length > 0) {
+      if (p.startsWith('[IMAGE_DATA:')) {
+        const imgWeight = 45;
+        if (count + imgWeight > targetWordsPerPage && currentBucket.length > 0) {
+          pages.push(currentBucket);
+          currentBucket = [{ text: p, paraIndex: idx, sliceStartOffset: 0 }];
+          count = imgWeight;
+        } else {
+          currentBucket.push({ text: p, paraIndex: idx, sliceStartOffset: 0 });
+          count += imgWeight;
+        }
+        return;
+      }
+
+      const wCount = p.trim().split(/\s+/).filter(Boolean).length;
+      // Split extra-long paragraphs cleanly on sentence boundaries so a single paragraph never overflows a phone screen
+      if (wCount > targetWordsPerPage * 1.15) {
+        const sentenceRegex = /[^.!?।؟]+[.!?।؟]*\s*/g;
+        let match: RegExpExecArray | null;
+        let sliceStart = 0;
+        let sliceText = '';
+        let sliceWords = 0;
+
+        while ((match = sentenceRegex.exec(p)) !== null) {
+          const seg = match[0];
+          const segWords = seg.trim().split(/\s+/).filter(Boolean).length;
+          if (sliceWords + segWords > targetWordsPerPage && sliceText.trim().length > 0) {
+            const trimmedSlice = sliceText.trimEnd();
+            if (count + sliceWords > targetWordsPerPage && currentBucket.length > 0) {
+              pages.push(currentBucket);
+              currentBucket = [{ text: trimmedSlice, paraIndex: idx, sliceStartOffset: sliceStart }];
+              count = sliceWords;
+            } else {
+              currentBucket.push({
+                text: trimmedSlice,
+                paraIndex: idx,
+                sliceStartOffset: sliceStart,
+              });
+              count += sliceWords;
+            }
+            sliceStart = match.index;
+            sliceText = seg;
+            sliceWords = segWords;
+          } else {
+            if (!sliceText) sliceStart = match.index;
+            sliceText += seg;
+            sliceWords += segWords;
+          }
+        }
+
+        if (sliceText.trim().length > 0) {
+          const trimmedSlice = sliceText.trimEnd();
+          if (count + sliceWords > targetWordsPerPage && currentBucket.length > 0) {
+            pages.push(currentBucket);
+            currentBucket = [{ text: trimmedSlice, paraIndex: idx, sliceStartOffset: sliceStart }];
+            count = sliceWords;
+          } else {
+            currentBucket.push({
+              text: trimmedSlice,
+              paraIndex: idx,
+              sliceStartOffset: sliceStart,
+            });
+            count += sliceWords;
+          }
+        }
+        return;
+      }
+
+      if (count + wCount > targetWordsPerPage && currentBucket.length > 0) {
         pages.push(currentBucket);
-        currentBucket = [{ text: p, paraIndex: idx }];
+        currentBucket = [{ text: p, paraIndex: idx, sliceStartOffset: 0 }];
         count = wCount;
       } else {
-        currentBucket.push({ text: p, paraIndex: idx });
+        currentBucket.push({ text: p, paraIndex: idx, sliceStartOffset: 0 });
         count += wCount;
       }
     });
+
     if (currentBucket.length > 0) pages.push(currentBucket);
-    return pages.length > 0 ? pages : [[{ text: currentChapter.content || '', paraIndex: 0 }]];
-  }, [currentChapter, wordsPerPage]);
+    return pages.length > 0
+      ? pages
+      : [[{ text: fallbackContent || '', paraIndex: 0, sliceStartOffset: 0 }]];
+  };
+
+  const paginatedPages = useMemo(
+    () =>
+      buildPaginatedChapterPages(
+        currentChapter.paragraphs || [],
+        currentChapter.content || '',
+        wordsPerPage
+      ),
+    [currentChapter, wordsPerPage]
+  );
 
   const totalPagesInChapter = Math.max(1, paginatedPages.length);
   const rawPageIndex = Math.min(
@@ -580,60 +673,61 @@ export const UnifiedReaderView: React.FC = () => {
     if (!activeBookMeta) return;
     const targetCh = chapters[nextChIdx];
     if (!targetCh) return;
+    const targetChPages = buildPaginatedChapterPages(
+      targetCh.paragraphs || [],
+      targetCh.content || '',
+      wordsPerPage
+    );
+    const safeTotalPages = Math.max(1, targetChPages.length);
+    const clampedPageIdx = Math.min(Math.max(0, nextPageIdx), safeTotalPages - 1);
     const overallProgress = Math.min(
       100,
       Math.max(
         1,
         Math.round(
-          ((nextChIdx + (nextPageIdx + 1) / Math.max(1, totalPagesInChapter)) /
+          ((nextChIdx + (clampedPageIdx + 1) / safeTotalPages) /
             Math.max(1, chapters.length)) *
             100
         )
       )
     );
-    const locNum = Math.max(1, (targetCh.startLocation || 1) + nextPageIdx * 2);
+    const locNum = Math.max(1, (targetCh.startLocation || 1) + clampedPageIdx * 2);
     updateActiveLocator(
       {
         chapterIndex: nextChIdx,
-        pageIndex: nextPageIdx,
-        paragraphIndex: 0,
+        pageIndex: clampedPageIdx,
+        paragraphIndex: targetChPages[clampedPageIdx]?.[0]?.paraIndex ?? 0,
         locationNumber: Math.min(activeBookMeta.totalLocations || 1, locNum),
         percentage: overallProgress,
       },
       pushHistory
     );
+    try {
+      mainReaderRef.current?.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+    } catch {
+      if (mainReaderRef.current) mainReaderRef.current.scrollTop = 0;
+    }
   };
 
   const pageStep = isTwoPageSpreadActive ? 2 : 1;
 
   const handlePrevPage = () => {
+    const now = Date.now();
+    if (now - lastPageTurnTimeRef.current < 260) return;
+    lastPageTurnTimeRef.current = now;
+
     if (currentPageIndex > 0) {
       triggerPageTurnAnimation('prev');
       navigateToChapterAndPage(currentChapterIndex, Math.max(0, currentPageIndex - pageStep));
     } else if (currentChapterIndex > 0) {
       triggerPageTurnAnimation('prev');
       const prevCh = chapters[currentChapterIndex - 1];
-      let prevPageCount = 1;
-      if (prevCh?.paragraphs?.length) {
-        let buckets = 0;
-        let currentLen = 0;
-        let count = 0;
-        prevCh.paragraphs.forEach((p) => {
-          if (!p) return;
-          const wCount = p.split(/\s+/).length;
-          if (count + wCount > wordsPerPage && currentLen > 0) {
-            buckets += 1;
-            currentLen = 1;
-            count = wCount;
-          } else {
-            currentLen += 1;
-            count += wCount;
-          }
-        });
-        if (currentLen > 0) buckets += 1;
-        prevPageCount = Math.max(1, buckets);
-      }
-      const rawLastIdx = Math.max(0, prevPageCount - 1);
+      const prevPages = buildPaginatedChapterPages(
+        prevCh?.paragraphs || [],
+        prevCh?.content || '',
+        wordsPerPage
+      );
+      const rawLastIdx = Math.max(0, prevPages.length - 1);
       const targetLastIdx =
         isTwoPageSpreadActive && rawLastIdx % 2 === 1 ? Math.max(0, rawLastIdx - 1) : rawLastIdx;
       navigateToChapterAndPage(currentChapterIndex - 1, targetLastIdx);
@@ -641,6 +735,10 @@ export const UnifiedReaderView: React.FC = () => {
   };
 
   const handleNextPage = () => {
+    const now = Date.now();
+    if (now - lastPageTurnTimeRef.current < 260) return;
+    lastPageTurnTimeRef.current = now;
+
     if (currentPageIndex + pageStep < totalPagesInChapter) {
       triggerPageTurnAnimation('next');
       navigateToChapterAndPage(currentChapterIndex, currentPageIndex + pageStep);
@@ -855,6 +953,50 @@ export const UnifiedReaderView: React.FC = () => {
     };
   };
 
+  // Compute exact character [start, end] offsets inside the full paragraph from a native DOM Range
+  const computeDomRangeOffsetsInParagraph = (
+    paraEl: HTMLElement,
+    domRange: Range
+  ): { start: number; end: number } | null => {
+    const sliceOffset = Number(paraEl.getAttribute('data-slice-offset')) || 0;
+    const walker = document.createTreeWalker(paraEl, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('[data-lumina-ui-badge="true"], rt, button')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    let charCount = 0;
+    let startOffset: number | null = null;
+    let endOffset: number | null = null;
+    let cur = walker.nextNode() as Text | null;
+
+    while (cur) {
+      const len = (cur.nodeValue || '').length;
+      if (cur === domRange.startContainer) {
+        startOffset = charCount + Math.min(len, Math.max(0, domRange.startOffset));
+      }
+      if (cur === domRange.endContainer) {
+        endOffset = charCount + Math.min(len, Math.max(0, domRange.endOffset));
+        break;
+      }
+      charCount += len;
+      cur = walker.nextNode() as Text | null;
+    }
+
+    if (startOffset !== null && endOffset !== null && endOffset > startOffset) {
+      return {
+        start: sliceOffset + startOffset,
+        end: sliceOffset + endOffset,
+      };
+    }
+    return null;
+  };
+
   // Non-passive touchmove lock when Hold-and-Drag word selection is active on touch screens
   useEffect(() => {
     const el = mainReaderRef.current;
@@ -876,18 +1018,31 @@ export const UnifiedReaderView: React.FC = () => {
       if (!selObj || selObj.rangeCount === 0) return;
       const rawText = selObj.toString() || '';
       const cleaned = cleanExtractedText(rawText);
-      if (cleaned.length < 2) return;
+      if (cleaned.length < 1) return;
 
       const anchorEl =
         selObj.anchorNode instanceof HTMLElement
           ? selObj.anchorNode
           : selObj.anchorNode?.parentElement;
-      const paraEl = anchorEl?.closest?.('[data-para-index]');
+      const paraEl = anchorEl?.closest?.('[data-para-index]') as HTMLElement | null;
       if (!paraEl) return;
 
       const pIdx = Number(paraEl.getAttribute('data-para-index'));
       if (Number.isFinite(pIdx)) {
         setSelectedParaIdx(pIdx);
+        try {
+          const domRange = selObj.getRangeAt(0);
+          const exactOffsets = computeDomRangeOffsetsInParagraph(paraEl, domRange);
+          if (exactOffsets) {
+            setSelectedCharRange({
+              paraIndex: pIdx,
+              start: exactOffsets.start,
+              end: exactOffsets.end,
+            });
+          }
+        } catch {
+          // ignore range read error
+        }
       }
       setSelectedText(cleaned);
 
@@ -924,14 +1079,32 @@ export const UnifiedReaderView: React.FC = () => {
     return () => document.removeEventListener('pointerdown', onPointerDownOutside);
   }, [selectedText]);
 
-  // Helper: Find a passage span inside a paragraph
+  // Helper: Find a passage span inside a paragraph (Prioritizes whole-word Unicode boundaries so "to" never matches inside "into" or "today")
   const findTextSpanInParagraph = (
     paragraphText: string,
     rawNeedle: string,
     fromIndex = 0
   ): { start: number; end: number } | null => {
     const needle = (rawNeedle || '').trim();
-    if (needle.length < 2 || !paragraphText) return null;
+    if (needle.length < 1 || !paragraphText) return null;
+
+    const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      const wordBoundaryRegex = new RegExp(
+        `(?<![\\p{L}\\p{M}\\p{N}])${escapedNeedle}(?![\\p{L}\\p{M}\\p{N}])`,
+        'iu'
+      );
+      const slice = paragraphText.slice(fromIndex);
+      const wbMatch = wordBoundaryRegex.exec(slice);
+      if (wbMatch && wbMatch.index !== undefined) {
+        return {
+          start: fromIndex + wbMatch.index,
+          end: fromIndex + wbMatch.index + wbMatch[0].length,
+        };
+      }
+    } catch {
+      // Fallback if environment lacks lookbehind
+    }
 
     const exactIdx = paragraphText.indexOf(needle, fromIndex);
     if (exactIdx !== -1) {
@@ -992,14 +1165,24 @@ export const UnifiedReaderView: React.FC = () => {
     const targetParaIdx = activeJumpTarget.paragraphIndex ?? targetHl?.paragraphIndex;
 
     let resolvedPageIdx = -1;
-    if (needle.length >= 2) {
+    if (typeof targetParaIdx === 'number' && typeof targetHl?.startOffset === 'number') {
       resolvedPageIdx = paginatedPages.findIndex((pageBucket) =>
-        pageBucket.some((p) => findTextSpanInParagraph(p.text, needle) !== null)
+        pageBucket.some(
+          (p) =>
+            p.paraIndex === targetParaIdx &&
+            targetHl.startOffset! >= p.sliceStartOffset &&
+            targetHl.startOffset! < p.sliceStartOffset + p.text.length
+        )
       );
     }
     if (resolvedPageIdx === -1 && typeof targetParaIdx === 'number') {
       resolvedPageIdx = paginatedPages.findIndex((pageBucket) =>
         pageBucket.some((p) => p.paraIndex === targetParaIdx)
+      );
+    }
+    if (resolvedPageIdx === -1 && needle.length >= 2) {
+      resolvedPageIdx = paginatedPages.findIndex((pageBucket) =>
+        pageBucket.some((p) => findTextSpanInParagraph(p.text, needle) !== null)
       );
     }
     if (resolvedPageIdx === -1 && typeof activeJumpTarget.pageIndex === 'number') {
@@ -1095,6 +1278,28 @@ export const UnifiedReaderView: React.FC = () => {
       : activeLocationNumber;
     const targetChapterTitle = isPdf ? `Page ${targetLoc}` : currentChapter.title;
 
+    const fullParaText = !isPdf ? currentChapter.paragraphs[selectedParaIdx] || '' : '';
+    const hasExactCharRange =
+      !isPdf &&
+      selectedCharRange !== null &&
+      selectedCharRange.paraIndex === selectedParaIdx &&
+      selectedCharRange.end > selectedCharRange.start;
+    const fallbackSpan =
+      !isPdf && !hasExactCharRange
+        ? findTextSpanInParagraph(fullParaText, selectedText.trim())
+        : null;
+
+    const resolvedStartOffset = hasExactCharRange
+      ? selectedCharRange!.start
+      : fallbackSpan
+      ? fallbackSpan.start
+      : undefined;
+    const resolvedEndOffset = hasExactCharRange
+      ? selectedCharRange!.end
+      : fallbackSpan
+      ? fallbackSpan.end
+      : undefined;
+
     await addHighlight({
       bookId: activeBookMeta.id,
       bookTitle: activeBookMeta.title,
@@ -1103,6 +1308,8 @@ export const UnifiedReaderView: React.FC = () => {
       chapterTitle: targetChapterTitle,
       pageIndex: isPdf ? targetLoc : currentPageIndex,
       paragraphIndex: selectedParaIdx,
+      startOffset: resolvedStartOffset,
+      endOffset: resolvedEndOffset,
       locationNumber: targetLoc,
       selectedText: selectedText.trim(),
       color,
@@ -1194,7 +1401,11 @@ export const UnifiedReaderView: React.FC = () => {
   };
 
   // Render paragraph with Bionic Reading, Footnotes, Clickable Multi-Highlight/Note Marks & Jump Spotlights
-  const renderParagraphContent = (text: string, paraIndex: number) => {
+  const renderParagraphContent = (
+    text: string,
+    paraIndex: number,
+    sliceStartOffset = 0
+  ) => {
     const matchedSpans: {
       hl?: Highlight;
       start: number;
@@ -1205,16 +1416,45 @@ export const UnifiedReaderView: React.FC = () => {
     const unmatchedParaHighlights: Highlight[] = [];
 
     chapterHighlights.forEach((hl) => {
-      if (!hl.selectedText || hl.selectedText.trim().length < 2) return;
+      if (!hl.selectedText || hl.selectedText.trim().length < 1) return;
+      // STRICT PARAGRAPH SCOPING: A highlight created in paragraph X must NEVER highlight matching words in paragraph Y
+      if (typeof hl.paragraphIndex === 'number' && hl.paragraphIndex !== paraIndex) {
+        return;
+      }
+
+      // 1. Exact Character-Offset Anchoring (Highlights ONLY the exact selected word/range instance!)
+      if (
+        typeof hl.startOffset === 'number' &&
+        typeof hl.endOffset === 'number' &&
+        hl.endOffset > hl.startOffset
+      ) {
+        const localStart = hl.startOffset - sliceStartOffset;
+        const localEnd = hl.endOffset - sliceStartOffset;
+        if (localEnd > 0 && localStart < text.length) {
+          const clampedStart = Math.max(0, localStart);
+          const clampedEnd = Math.min(text.length, localEnd);
+          if (clampedEnd > clampedStart) {
+            matchedSpans.push({ hl, start: clampedStart, end: clampedEnd });
+          }
+        }
+        return;
+      }
+
+      // 2. Fallback for legacy highlights without offsets (Scoped to this paragraph only)
       const span = findTextSpanInParagraph(text, hl.selectedText);
       if (span) {
         matchedSpans.push({ hl, start: span.start, end: span.end });
-      } else if (hl.paragraphIndex === paraIndex) {
+      } else if (hl.paragraphIndex === paraIndex && sliceStartOffset === 0) {
         unmatchedParaHighlights.push(hl);
       }
     });
 
-    if (spotlightTarget?.searchText && spotlightTarget.searchText.trim().length >= 2) {
+    if (
+      spotlightTarget?.searchText &&
+      spotlightTarget.searchText.trim().length >= 2 &&
+      (spotlightTarget.paragraphIndex === undefined ||
+        spotlightTarget.paragraphIndex === paraIndex)
+    ) {
       const spotSpan = findTextSpanInParagraph(text, spotlightTarget.searchText);
       if (
         spotSpan &&
@@ -1230,24 +1470,35 @@ export const UnifiedReaderView: React.FC = () => {
       }
     }
 
-    // Visual Active Touch Selection Highlight (Uses exact character range when available so duplicate words highlight the exact tapped word)
+    // Visual Active Touch Selection Highlight (Uses exact character range relative to sliceStartOffset so duplicate words highlight ONLY the exact tapped word)
     if (
       selectedText &&
       selectedText.trim().length >= 1 &&
       selectedParaIdx === paraIndex
     ) {
-      const activeSelSpan =
+      let activeSelSpan: { start: number; end: number } | null = null;
+      if (
         selectedCharRange &&
         selectedCharRange.paraIndex === paraIndex &&
-        selectedCharRange.end > selectedCharRange.start &&
-        selectedCharRange.end <= text.length
-          ? { start: selectedCharRange.start, end: selectedCharRange.end }
-          : findTextSpanInParagraph(text, selectedText);
+        selectedCharRange.end > selectedCharRange.start
+      ) {
+        const localStart = selectedCharRange.start - sliceStartOffset;
+        const localEnd = selectedCharRange.end - sliceStartOffset;
+        if (localEnd > 0 && localStart < text.length) {
+          activeSelSpan = {
+            start: Math.max(0, localStart),
+            end: Math.min(text.length, localEnd),
+          };
+        }
+      } else {
+        activeSelSpan = findTextSpanInParagraph(text, selectedText);
+      }
 
       if (
         activeSelSpan &&
+        activeSelSpan.end > activeSelSpan.start &&
         !matchedSpans.some(
-          (m) => !(activeSelSpan.end <= m.start || activeSelSpan.start >= m.end)
+          (m) => !(activeSelSpan!.end <= m.start || activeSelSpan!.start >= m.end)
         )
       ) {
         matchedSpans.push({
@@ -2176,38 +2427,6 @@ export const UnifiedReaderView: React.FC = () => {
                 </>
               )}
             </div>
-
-            <div className="space-y-2 pt-2 border-t border-current/10">
-              <label className="font-semibold flex items-center gap-1.5">
-                <Headphones className="w-3.5 h-3.5" />
-                <span>Procedural Ambient Soundscape</span>
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {(
-                  [
-                    { id: 'none', label: 'Silence' },
-                    { id: 'rain', label: 'Soft Rain' },
-                    { id: 'fireplace', label: 'Warm Hearth' },
-                    { id: 'library', label: 'Archive Hall' },
-                    { id: 'vinyl', label: 'Vinyl Study' },
-                    { id: 'brown_noise', label: 'Deep Brown Noise' },
-                  ] as { id: SoundscapeType; label: string }[]
-                ).map((snd) => (
-                  <button
-                    key={snd.id}
-                    type="button"
-                    onClick={() => updateSettings({ soundscape: snd.id })}
-                    className={`px-3 py-1.5 rounded-lg border text-left cursor-pointer ${
-                      settings.soundscape === snd.id
-                        ? `${palette.accentBg} text-white font-semibold`
-                        : `${palette.elevatedBg} ${palette.borderHairline}`
-                    }`}
-                  >
-                    {snd.label}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
         )}
       </div>
@@ -2252,7 +2471,7 @@ export const UnifiedReaderView: React.FC = () => {
           }}
           className={`z-30 flex items-center justify-between gap-2 sm:gap-3 px-3 sm:px-6 pb-2.5 sm:pb-3 border-b shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
         >
-          {/* Far-Left Pinned Back to Library Button (Minimum 40-44px Touch Hitbox, Never shrinks or clips) */}
+          {/* Far-Left Pinned Back to Library Button (Single Source of Truth, Minimum 40px Touch Hitbox) */}
           <button
             type="button"
             onClick={closeActiveBook}
@@ -2260,7 +2479,7 @@ export const UnifiedReaderView: React.FC = () => {
             className={`min-h-[40px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0 ${palette.elevatedBg} ${palette.borderHairline} hover:border-amber-500/60`}
           >
             <ArrowLeft className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-            <span>Back to Library</span>
+            <span>Library</span>
           </button>
 
           {/* Center-Left Book Title (Truncates gracefully on narrow screens without affecting Back button) */}
@@ -2273,9 +2492,9 @@ export const UnifiedReaderView: React.FC = () => {
             </p>
           </div>
 
-          {/* Right: Reader Tool Drawers (Scrolls horizontally on small screens so Back button is never pushed off) */}
+          {/* Right: Streamlined Reader Tool Actions (Zero Redundant Controls) */}
           <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto min-w-0 max-w-full py-0.5">
-            {/* Instant 1-Page / 2-Page Spread Switcher across all devices */}
+            {/* 2-Page Spread Switcher on Tablet/Desktop (Layout is also configurable inside Aa Display Settings) */}
             <button
               type="button"
               onClick={() => {
@@ -2285,7 +2504,7 @@ export const UnifiedReaderView: React.FC = () => {
                   pdfSpreadMode: nextIsSpread ? 'spread' : 'single',
                 });
               }}
-              className={`inline-flex min-h-[38px] sm:min-h-[36px] items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`hidden md:inline-flex min-h-[36px] items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
                 settings.layoutMode === 'double'
                   ? `${palette.accentBg} text-white font-semibold`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
@@ -2307,7 +2526,7 @@ export const UnifiedReaderView: React.FC = () => {
               title="Contents, Notes & Bookmarks"
             >
               <List className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Contents & Notes</span>
+              <span className="hidden lg:inline">Contents</span>
             </button>
 
             <button
@@ -2363,39 +2582,30 @@ export const UnifiedReaderView: React.FC = () => {
               onClick={() =>
                 setActiveDrawer(activeDrawer === 'typography' ? 'none' : 'typography')
               }
-              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[38px] sm:min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
                 activeDrawer === 'typography'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
               }`}
-              title="Typography, Themes & Soundscapes"
+              title="Typography, Themes & Page Layout"
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Aa</span>
+              <span>Aa</span>
             </button>
 
             <button
               type="button"
               onClick={() => {
                 setIsTtsBarOpen((v) => !v);
-                if (!isTtsBarOpen) {
-                  const spreadParas = [
-                    ...currentPageParagraphs,
-                    ...(rightSpreadPageParagraphs || []),
-                  ].filter((p) => !p.text.startsWith('[IMAGE_DATA:'));
-                  ttsService.speakText(spreadParas.map((p) => p.text).join(' '));
-                } else {
-                  ttsService.stop();
-                }
               }}
               className={`min-h-[38px] min-w-[38px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-lg text-xs cursor-pointer shrink-0 ${
-                isTtsBarOpen
+                isTtsBarOpen || settings.soundscape !== 'none'
                   ? `${palette.accentBg} text-white`
                   : `${palette.surfaceBg} ${palette.textSecondary}`
               }`}
-              title="Read Aloud & Sleep Timer"
+              title="Read Aloud, Ambient Soundscapes & Sleep Timer"
             >
-              <Volume2 className="w-4 h-4" />
+              <Headphones className="w-4 h-4" />
             </button>
 
             <button
@@ -2454,45 +2664,88 @@ export const UnifiedReaderView: React.FC = () => {
           </div>
         </header>
       ) : (
+        /* Subtle Low-Contrast Zen Mode Exit Pill — Never overlaps Android Status Bar or Book Prose */
         <div
           style={{
-            top: `max(0.75rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
+            top: `max(0.625rem, calc(env(safe-area-inset-top, 0px) + ${safeTopPx}px))`,
           }}
-          className="fixed left-3 right-3 z-50 flex items-center justify-between pointer-events-none"
+          className="fixed right-3 z-50 flex items-center justify-end pointer-events-none"
         >
           <button
             type="button"
-            onClick={closeActiveBook}
-            className={`min-h-[40px] pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border shadow-md opacity-90 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
-          >
-            <ArrowLeft className="w-3.5 h-3.5 text-amber-500" />
-            <span>Back to Library</span>
-          </button>
-          <button
-            type="button"
             onClick={toggleZenMode}
-            className={`min-h-[40px] pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border shadow-md opacity-90 hover:opacity-100 transition-opacity cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+            title="Exit Zen Mode (Z or Esc)"
+            className={`min-h-[34px] pointer-events-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border backdrop-blur-xs opacity-45 hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer ${palette.surfaceBg} ${palette.borderHairline} ${palette.textSecondary}`}
           >
-            <Minimize2 className="w-3.5 h-3.5" />
+            <Minimize2 className="w-3 h-3" />
             <span>Exit Zen</span>
           </button>
         </div>
       )}
 
-      {/* Read-Aloud & Audio Sleep Timer Controller Bar */}
+      {/* Unified Audio Studio: Read-Aloud TTS, Procedural Soundscape & Sleep Timer Bar */}
       {isTtsBarOpen && (
         <div
-          className={`z-30 px-4 py-2 border-b flex flex-wrap items-center justify-between gap-2 text-xs ${palette.surfaceBg} ${palette.borderHairline}`}
+          className={`z-30 px-3 sm:px-6 py-2.5 border-b flex flex-wrap items-center justify-between gap-2.5 text-xs ${palette.surfaceBg} ${palette.borderHairline}`}
         >
-          <div className="flex items-center gap-2">
-            <Volume2 className="w-3.5 h-3.5 text-amber-500" />
-            <span className="font-medium">
-              Read-Aloud Active · Tap any paragraph below to read from that line
-            </span>
+          {/* Read-Aloud Controls */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const spreadParas = [
+                  ...currentPageParagraphs,
+                  ...(rightSpreadPageParagraphs || []),
+                ].filter((p) => !p.text.startsWith('[IMAGE_DATA:'));
+                ttsService.speakText(spreadParas.map((p) => p.text).join(' '));
+              }}
+              className={`px-2.5 py-1 rounded-lg font-semibold inline-flex items-center gap-1.5 cursor-pointer text-white ${palette.accentBg}`}
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Read Page Aloud</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => ttsService.stop()}
+              className={`px-2.5 py-1 rounded-lg border font-medium cursor-pointer ${palette.elevatedBg} ${palette.borderHairline}`}
+            >
+              Stop Voice
+            </button>
           </div>
-          <div className="flex items-center gap-2">
+
+          {/* Ambient Soundscape Pills (Single Source of Truth) */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Headphones className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            <span className={`text-[11px] font-medium ${palette.textMuted}`}>Soundscape:</span>
+            {(
+              [
+                { id: 'none', label: 'Off' },
+                { id: 'rain', label: 'Rain' },
+                { id: 'fireplace', label: 'Hearth' },
+                { id: 'library', label: 'Archive' },
+                { id: 'vinyl', label: 'Vinyl' },
+                { id: 'brown_noise', label: 'Brown Noise' },
+              ] as { id: SoundscapeType; label: string }[]
+            ).map((snd) => (
+              <button
+                key={snd.id}
+                type="button"
+                onClick={() => updateSettings({ soundscape: snd.id })}
+                className={`px-2 py-0.5 rounded-md border text-[11px] cursor-pointer transition-colors ${
+                  settings.soundscape === snd.id
+                    ? `${palette.accentBg} text-white font-semibold border-transparent`
+                    : `${palette.elevatedBg} ${palette.borderHairline}`
+                }`}
+              >
+                {snd.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Sleep Timer & Dismiss */}
+          <div className="flex items-center gap-1.5">
             <Timer className="w-3.5 h-3.5 opacity-70" />
-            <span className={palette.textMuted}>Sleep Timer:</span>
+            <span className={`text-[11px] ${palette.textMuted}`}>Sleep:</span>
             {([15, 30, 45, 60] as const).map((mins) => (
               <button
                 key={mins}
@@ -2511,16 +2764,14 @@ export const UnifiedReaderView: React.FC = () => {
             ))}
             {sleepTimerMinutesLeft !== null && (
               <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
-                ({sleepTimerMinutesLeft}m left)
+                ({sleepTimerMinutesLeft}m)
               </span>
             )}
             <button
               type="button"
-              onClick={() => {
-                ttsService.stop();
-                setIsTtsBarOpen(false);
-              }}
+              onClick={() => setIsTtsBarOpen(false)}
               className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+              title="Close Audio Studio"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -2575,13 +2826,18 @@ export const UnifiedReaderView: React.FC = () => {
                       type="button"
                       onClick={() => {
                         const rawPara = currentChapter.paragraphs[selectedParaIdx] || '';
+                        const fallbackSpan = findTextSpanInParagraph(rawPara, selectedText);
                         const curStart =
                           selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
                             ? selectedCharRange.start
-                            : Math.max(0, rawPara.toLowerCase().indexOf(selectedText.toLowerCase()));
+                            : fallbackSpan
+                            ? fallbackSpan.start
+                            : 0;
                         const curEnd =
                           selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
                             ? selectedCharRange.end
+                            : fallbackSpan
+                            ? fallbackSpan.end
                             : curStart + selectedText.length;
 
                         const after = rawPara.slice(curEnd);
@@ -2611,10 +2867,13 @@ export const UnifiedReaderView: React.FC = () => {
                       type="button"
                       onClick={() => {
                         const rawPara = currentChapter.paragraphs[selectedParaIdx] || '';
+                        const fallbackSpan = findTextSpanInParagraph(rawPara, selectedText);
                         const curStart =
                           selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
                             ? selectedCharRange.start
-                            : Math.max(0, rawPara.toLowerCase().indexOf(selectedText.toLowerCase()));
+                            : fallbackSpan
+                            ? fallbackSpan.start
+                            : 0;
                         let sentStart = curStart;
                         while (sentStart > 0 && !/[.!?]/.test(rawPara[sentStart - 1])) {
                           sentStart--;
@@ -2625,6 +2884,8 @@ export const UnifiedReaderView: React.FC = () => {
                         let sentEnd =
                           selectedCharRange && selectedCharRange.paraIndex === selectedParaIdx
                             ? selectedCharRange.end
+                            : fallbackSpan
+                            ? fallbackSpan.end
                             : curStart + selectedText.length;
                         while (sentEnd < rawPara.length && !/[.!?]/.test(rawPara[sentEnd])) {
                           sentEnd++;
@@ -2812,7 +3073,18 @@ export const UnifiedReaderView: React.FC = () => {
       )}
 
       {/* Main Reader Content Viewport (Supports Docked Side-by-Side Split-Screen Study View on iPad/Desktop) */}
-      <div className="flex-1 flex relative overflow-hidden">
+      <div
+        style={
+          isZenMode
+            ? {
+                paddingTop: `max(2.5rem, calc(env(safe-area-inset-top, 0px) + ${
+                  Math.max(safeTopPx, 32) + 8
+                }px))`,
+              }
+            : undefined
+        }
+        className="flex-1 flex relative overflow-hidden"
+      >
         {activeBookMeta.format === 'pdf' ? (
           <div className="w-full h-full flex-1 overflow-hidden">
             <VirtualizedPdfEngine
@@ -2893,24 +3165,28 @@ export const UnifiedReaderView: React.FC = () => {
                   startX > 28
                 ) {
                   const pIdx = Number(paraEl.getAttribute('data-para-index'));
+                  const sliceOffset = Number(paraEl.getAttribute('data-slice-offset')) || 0;
                   longPressTimerRef.current = window.setTimeout(() => {
                     longPressTimerRef.current = null;
                     const hit = findWordAtPointInParagraph(paraEl, startX, startY);
                     if (hit && Number.isFinite(pIdx)) {
+                      const absStart = hit.startChar + sliceOffset;
+                      const absEnd = hit.endChar + sliceOffset;
+                      const fullParaText = currentChapter.paragraphs[pIdx] || hit.fullText;
                       isTouchSelectingRef.current = true;
                       setIsTouchSelecting(true);
                       touchSelectionAnchorRef.current = {
                         paraIndex: pIdx,
-                        startChar: hit.startChar,
-                        endChar: hit.endChar,
-                        fullText: hit.fullText,
+                        startChar: absStart,
+                        endChar: absEnd,
+                        fullText: fullParaText,
                         isSingleWord: true,
                       };
                       setSelectedParaIdx(pIdx);
                       setSelectedCharRange({
                         paraIndex: pIdx,
-                        start: hit.startChar,
-                        end: hit.endChar,
+                        start: absStart,
+                        end: absEnd,
                       });
                       setSelectedText(hit.word);
                       try {
@@ -2927,14 +3203,17 @@ export const UnifiedReaderView: React.FC = () => {
               const g = touchGestureRef.current;
               if (!g) return;
 
-              if (e.touches.length === 1 && longPressTimerRef.current) {
+              if (e.touches.length === 1) {
                 const moveDist = Math.hypot(
                   e.touches[0].clientX - g.startX,
                   e.touches[0].clientY - g.startY
                 );
                 if (moveDist > 10) {
-                  window.clearTimeout(longPressTimerRef.current);
-                  longPressTimerRef.current = null;
+                  lastTouchMoveTimeRef.current = Date.now();
+                  if (longPressTimerRef.current) {
+                    window.clearTimeout(longPressTimerRef.current);
+                    longPressTimerRef.current = null;
+                  }
                 }
               }
 
@@ -2949,14 +3228,17 @@ export const UnifiedReaderView: React.FC = () => {
                   `p[data-para-index="${anchor.paraIndex}"]`
                 ) as HTMLElement | null;
                 if (paraEl) {
+                  const sliceOffset = Number(paraEl.getAttribute('data-slice-offset')) || 0;
                   const curHit = findWordAtPointInParagraph(
                     paraEl,
                     e.touches[0].clientX,
                     e.touches[0].clientY
                   );
                   if (curHit) {
-                    const rangeStart = Math.min(anchor.startChar, curHit.startChar);
-                    const rangeEnd = Math.max(anchor.endChar, curHit.endChar);
+                    const curAbsStart = curHit.startChar + sliceOffset;
+                    const curAbsEnd = curHit.endChar + sliceOffset;
+                    const rangeStart = Math.min(anchor.startChar, curAbsStart);
+                    const rangeEnd = Math.max(anchor.endChar, curAbsEnd);
                     anchor.isSingleWord =
                       rangeStart === anchor.startChar && rangeEnd === anchor.endChar;
                     setSelectedCharRange({
@@ -3018,8 +3300,8 @@ export const UnifiedReaderView: React.FC = () => {
               ) {
                 const dx = e.touches[0].clientX - g.startX;
                 const dy = e.touches[0].clientY - g.startY;
-                if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 1.25) {
-                  const damped = Math.max(-110, Math.min(110, dx * 0.45));
+                if (Math.abs(dx) > 18 && Math.abs(dx) > Math.abs(dy) * 1.35) {
+                  const damped = Math.max(-96, Math.min(96, dx * 0.42));
                   setSwipeDeltaX(damped);
                 }
               }
@@ -3051,9 +3333,10 @@ export const UnifiedReaderView: React.FC = () => {
                 if (
                   !activeSel &&
                   settings.layoutMode !== 'scroll' &&
-                  Math.abs(dx) > 48 &&
-                  Math.abs(dx) > Math.abs(dy) * 1.25
+                  Math.abs(dx) > 54 &&
+                  Math.abs(dx) > Math.abs(dy) * 1.35
                 ) {
+                  lastTouchMoveTimeRef.current = Date.now();
                   if (dx < 0) {
                     if (isBookRtl) handlePrevPage();
                     else handleNextPage();
@@ -3085,15 +3368,42 @@ export const UnifiedReaderView: React.FC = () => {
               }
             }}
             onMouseUp={() => {
-              const sel = cleanExtractedText(window.getSelection()?.toString() || '');
-              if (sel.length > 1) {
+              if (Date.now() - justFinishedTouchSelectRef.current < 450) return;
+              const selection = window.getSelection();
+              const sel = cleanExtractedText(selection?.toString() || '');
+              if (sel.length > 1 && selection && selection.rangeCount > 0) {
                 justFinishedTouchSelectRef.current = Date.now();
-                setSelectedCharRange(null);
+                const domRange = selection.getRangeAt(0);
+                const anchorEl =
+                  domRange.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+                    ? (domRange.commonAncestorContainer as HTMLElement)
+                    : domRange.commonAncestorContainer.parentElement;
+                const paraEl = anchorEl?.closest?.('p[data-para-index]') as HTMLElement | null;
+                if (paraEl) {
+                  const pIdx = Number(paraEl.getAttribute('data-para-index'));
+                  const sliceOffset = Number(paraEl.getAttribute('data-slice-offset')) || 0;
+                  const exactOffsets = computeDomRangeOffsetsInParagraph(paraEl, domRange);
+                  if (Number.isFinite(pIdx)) {
+                    setSelectedParaIdx(pIdx);
+                    if (exactOffsets) {
+                      setSelectedCharRange({
+                        paraIndex: pIdx,
+                        start: exactOffsets.start + sliceOffset,
+                        end: exactOffsets.end + sliceOffset,
+                      });
+                    }
+                  }
+                }
                 setSelectedText(sel);
               }
             }}
             onClick={(e) => {
-              if (Date.now() - justFinishedTouchSelectRef.current < 350) return;
+              if (
+                Date.now() - justFinishedTouchSelectRef.current < 400 ||
+                Date.now() - lastTouchMoveTimeRef.current < 400
+              ) {
+                return;
+              }
 
               if (activeDrawer !== 'none' && !isDrawerPinned) {
                 setActiveDrawer('none');
@@ -3114,22 +3424,28 @@ export const UnifiedReaderView: React.FC = () => {
 
                 if (paraEl && !isTtsBarOpen && activeNativeSel.length <= 1) {
                   const pIdx = Number(paraEl.getAttribute('data-para-index'));
+                  const sliceOffset = Number(paraEl.getAttribute('data-slice-offset')) || 0;
                   const hit = findWordAtPointInParagraph(paraEl, e.clientX, e.clientY);
                   const prevAnchor = touchSelectionAnchorRef.current;
 
                   if (hit && Number.isFinite(pIdx)) {
+                    const absStart = hit.startChar + sliceOffset;
+                    const absEnd = hit.endChar + sliceOffset;
+                    const fullParaText = currentChapter.paragraphs[pIdx] || hit.fullText;
+
                     // Two-Tap Range Selection: Tap 1 anchored a single word, Tap 2 expands to full phrase between Word 1 and Word 2
                     if (
                       selectedText &&
                       prevAnchor &&
                       prevAnchor.paraIndex === pIdx &&
                       prevAnchor.isSingleWord &&
-                      hit.startChar !== prevAnchor.startChar
+                      absStart !== prevAnchor.startChar
                     ) {
-                      const rangeStart = Math.min(prevAnchor.startChar, hit.startChar);
-                      const rangeEnd = Math.max(prevAnchor.endChar, hit.endChar);
+                      const rangeStart = Math.min(prevAnchor.startChar, absStart);
+                      const rangeEnd = Math.max(prevAnchor.endChar, absEnd);
                       touchSelectionAnchorRef.current = {
                         ...prevAnchor,
+                        fullText: fullParaText,
                         isSingleWord: false,
                       };
                       setSelectedParaIdx(pIdx);
@@ -3138,7 +3454,7 @@ export const UnifiedReaderView: React.FC = () => {
                         start: rangeStart,
                         end: rangeEnd,
                       });
-                      setSelectedText(cleanExtractedText(hit.fullText.slice(rangeStart, rangeEnd)));
+                      setSelectedText(cleanExtractedText(fullParaText.slice(rangeStart, rangeEnd)));
                       return;
                     }
 
@@ -3154,16 +3470,16 @@ export const UnifiedReaderView: React.FC = () => {
                     // Tap 1 on a word: Select word & set anchor for optional Tap 2 range expansion
                     touchSelectionAnchorRef.current = {
                       paraIndex: pIdx,
-                      startChar: hit.startChar,
-                      endChar: hit.endChar,
-                      fullText: hit.fullText,
+                      startChar: absStart,
+                      endChar: absEnd,
+                      fullText: fullParaText,
                       isSingleWord: true,
                     };
                     setSelectedParaIdx(pIdx);
                     setSelectedCharRange({
                       paraIndex: pIdx,
-                      start: hit.startChar,
-                      end: hit.endChar,
+                      start: absStart,
+                      end: absEnd,
                     });
                     setSelectedText(hit.word);
                     return;
@@ -3251,66 +3567,74 @@ export const UnifiedReaderView: React.FC = () => {
                           textAlign: isBookRtl ? 'right' : settings.textAlign,
                         }}
                       >
-                        {currentPageParagraphs.map(({ text, paraIndex }, idx) => {
-                          if (text.startsWith('[IMAGE_DATA:')) {
-                            const inner = text.slice('[IMAGE_DATA:'.length, -1);
-                            const pipeIdx = inner.indexOf('|');
-                            const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
-                            const caption =
-                              pipeIdx !== -1 ? inner.slice(pipeIdx + 1) : 'Embedded Archival Figure';
+                        {currentPageParagraphs.map(
+                          ({ text, paraIndex, sliceStartOffset = 0 }, idx) => {
+                            if (text.startsWith('[IMAGE_DATA:')) {
+                              const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                              const pipeIdx = inner.indexOf('|');
+                              const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                              const caption =
+                                pipeIdx !== -1
+                                  ? inner.slice(pipeIdx + 1)
+                                  : 'Embedded Archival Figure';
+                              return (
+                                <figure
+                                  key={`${paraIndex}-${sliceStartOffset}`}
+                                  data-para-index={paraIndex}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLightboxImage({ src: dataUrl, caption });
+                                  }}
+                                  className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                                >
+                                  <img
+                                    src={dataUrl}
+                                    alt={caption}
+                                    className="max-h-64 mx-auto object-contain rounded-lg"
+                                  />
+                                  <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                                    {caption}
+                                  </figcaption>
+                                </figure>
+                              );
+                            }
+                            const paraRtl = isRtlText(text);
                             return (
-                              <figure
-                                key={paraIndex}
+                              <p
+                                key={`${paraIndex}-${sliceStartOffset}`}
                                 data-para-index={paraIndex}
+                                data-slice-offset={sliceStartOffset}
+                                dir={paraRtl ? 'rtl' : 'auto'}
+                                onMouseUp={() => setSelectedParaIdx(paraIndex)}
+                                onTouchEnd={() => setSelectedParaIdx(paraIndex)}
                                 onClick={(e) => {
-                                  e.stopPropagation();
-                                  setLightboxImage({ src: dataUrl, caption });
+                                  if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
+                                    e.stopPropagation();
+                                    ttsService.speakText(text);
+                                  }
                                 }}
-                                className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                                onDoubleClick={() => {
+                                  const sel = window.getSelection()?.toString().trim();
+                                  if (sel) handleWordLookup(sel, text);
+                                }}
+                                className={`leading-relaxed ${
+                                  !paraRtl &&
+                                  idx === 0 &&
+                                  currentPageIndex === 0 &&
+                                  sliceStartOffset === 0
+                                    ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
+                                    : ''
+                                } ${
+                                  ttsSentence && text.includes(ttsSentence)
+                                    ? 'bg-amber-500/15 rounded px-1'
+                                    : ''
+                                }`}
                               >
-                                <img
-                                  src={dataUrl}
-                                  alt={caption}
-                                  className="max-h-64 mx-auto object-contain rounded-lg"
-                                />
-                                <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
-                                  {caption}
-                                </figcaption>
-                              </figure>
+                                {renderParagraphContent(text, paraIndex, sliceStartOffset)}
+                              </p>
                             );
                           }
-                          const paraRtl = isRtlText(text);
-                          return (
-                            <p
-                              key={paraIndex}
-                              data-para-index={paraIndex}
-                              dir={paraRtl ? 'rtl' : 'auto'}
-                              onMouseUp={() => setSelectedParaIdx(paraIndex)}
-                              onTouchEnd={() => setSelectedParaIdx(paraIndex)}
-                              onClick={(e) => {
-                                if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
-                                  e.stopPropagation();
-                                  ttsService.speakText(text);
-                                }
-                              }}
-                              onDoubleClick={() => {
-                                const sel = window.getSelection()?.toString().trim();
-                                if (sel) handleWordLookup(sel, text);
-                              }}
-                              className={`leading-relaxed ${
-                                !paraRtl && idx === 0 && currentPageIndex === 0
-                                  ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
-                                  : ''
-                              } ${
-                                ttsSentence && text.includes(ttsSentence)
-                                  ? 'bg-amber-500/15 rounded px-1'
-                                  : ''
-                              }`}
-                            >
-                              {renderParagraphContent(text, paraIndex)}
-                            </p>
-                          );
-                        })}
+                        )}
                       </div>
                     </div>
 
@@ -3358,64 +3682,67 @@ export const UnifiedReaderView: React.FC = () => {
                             textAlign: isBookRtl ? 'right' : settings.textAlign,
                           }}
                         >
-                          {rightSpreadPageParagraphs.map(({ text, paraIndex }) => {
-                            if (text.startsWith('[IMAGE_DATA:')) {
-                              const inner = text.slice('[IMAGE_DATA:'.length, -1);
-                              const pipeIdx = inner.indexOf('|');
-                              const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
-                              const caption =
-                                pipeIdx !== -1
-                                  ? inner.slice(pipeIdx + 1)
-                                  : 'Embedded Archival Figure';
+                          {rightSpreadPageParagraphs.map(
+                            ({ text, paraIndex, sliceStartOffset = 0 }) => {
+                              if (text.startsWith('[IMAGE_DATA:')) {
+                                const inner = text.slice('[IMAGE_DATA:'.length, -1);
+                                const pipeIdx = inner.indexOf('|');
+                                const dataUrl = pipeIdx !== -1 ? inner.slice(0, pipeIdx) : inner;
+                                const caption =
+                                  pipeIdx !== -1
+                                    ? inner.slice(pipeIdx + 1)
+                                    : 'Embedded Archival Figure';
+                                return (
+                                  <figure
+                                    key={`${paraIndex}-${sliceStartOffset}`}
+                                    data-para-index={paraIndex}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setLightboxImage({ src: dataUrl, caption });
+                                    }}
+                                    className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                                  >
+                                    <img
+                                      src={dataUrl}
+                                      alt={caption}
+                                      className="max-h-64 mx-auto object-contain rounded-lg"
+                                    />
+                                    <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
+                                      {caption}
+                                    </figcaption>
+                                  </figure>
+                                );
+                              }
+                              const paraRtl = isRtlText(text);
                               return (
-                                <figure
-                                  key={paraIndex}
+                                <p
+                                  key={`${paraIndex}-${sliceStartOffset}`}
                                   data-para-index={paraIndex}
+                                  data-slice-offset={sliceStartOffset}
+                                  dir={paraRtl ? 'rtl' : 'auto'}
+                                  onMouseUp={() => setSelectedParaIdx(paraIndex)}
+                                  onTouchEnd={() => setSelectedParaIdx(paraIndex)}
                                   onClick={(e) => {
-                                    e.stopPropagation();
-                                    setLightboxImage({ src: dataUrl, caption });
+                                    if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
+                                      e.stopPropagation();
+                                      ttsService.speakText(text);
+                                    }
                                   }}
-                                  className={`my-4 p-3 rounded-xl border text-center space-y-2 cursor-zoom-in ${palette.surfaceBg} ${palette.borderHairline}`}
+                                  onDoubleClick={() => {
+                                    const sel = window.getSelection()?.toString().trim();
+                                    if (sel) handleWordLookup(sel, text);
+                                  }}
+                                  className={`leading-relaxed ${
+                                    ttsSentence && text.includes(ttsSentence)
+                                      ? 'bg-amber-500/15 rounded px-1'
+                                      : ''
+                                  }`}
                                 >
-                                  <img
-                                    src={dataUrl}
-                                    alt={caption}
-                                    className="max-h-64 mx-auto object-contain rounded-lg"
-                                  />
-                                  <figcaption className={`text-xs font-sans ${palette.textMuted}`}>
-                                    {caption}
-                                  </figcaption>
-                                </figure>
+                                  {renderParagraphContent(text, paraIndex, sliceStartOffset)}
+                                </p>
                               );
                             }
-                            const paraRtl = isRtlText(text);
-                            return (
-                              <p
-                                key={paraIndex}
-                                data-para-index={paraIndex}
-                                dir={paraRtl ? 'rtl' : 'auto'}
-                                onMouseUp={() => setSelectedParaIdx(paraIndex)}
-                                onTouchEnd={() => setSelectedParaIdx(paraIndex)}
-                                onClick={(e) => {
-                                  if (isTtsBarOpen && !window.getSelection()?.toString().trim()) {
-                                    e.stopPropagation();
-                                    ttsService.speakText(text);
-                                  }
-                                }}
-                                onDoubleClick={() => {
-                                  const sel = window.getSelection()?.toString().trim();
-                                  if (sel) handleWordLookup(sel, text);
-                                }}
-                                className={`leading-relaxed ${
-                                  ttsSentence && text.includes(ttsSentence)
-                                    ? 'bg-amber-500/15 rounded px-1'
-                                    : ''
-                                }`}
-                              >
-                                {renderParagraphContent(text, paraIndex)}
-                              </p>
-                            );
-                          })}
+                          )}
                         </div>
                       ) : (
                         <div
@@ -3482,9 +3809,13 @@ export const UnifiedReaderView: React.FC = () => {
                     }}
                   >
                     {(settings.layoutMode === 'scroll'
-                      ? currentChapter.paragraphs.map((text, idx) => ({ text, paraIndex: idx }))
+                      ? currentChapter.paragraphs.map((text, idx) => ({
+                          text,
+                          paraIndex: idx,
+                          sliceStartOffset: 0,
+                        }))
                       : currentPageParagraphs
-                    ).map(({ text, paraIndex }, idx) => {
+                    ).map(({ text, paraIndex, sliceStartOffset = 0 }, idx) => {
                       if (text.startsWith('[IMAGE_DATA:')) {
                         const inner = text.slice('[IMAGE_DATA:'.length, -1);
                         const pipeIdx = inner.indexOf('|');
@@ -3495,7 +3826,7 @@ export const UnifiedReaderView: React.FC = () => {
                             : 'Embedded Archival Figure';
                         return (
                           <figure
-                            key={paraIndex}
+                            key={`${paraIndex}-${sliceStartOffset}`}
                             data-para-index={paraIndex}
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3518,8 +3849,9 @@ export const UnifiedReaderView: React.FC = () => {
                       const paraRtl = isRtlText(text);
                       return (
                         <p
-                          key={paraIndex}
+                          key={`${paraIndex}-${sliceStartOffset}`}
                           data-para-index={paraIndex}
+                          data-slice-offset={sliceStartOffset}
                           dir={paraRtl ? 'rtl' : 'auto'}
                           onMouseUp={() => setSelectedParaIdx(paraIndex)}
                           onTouchEnd={() => setSelectedParaIdx(paraIndex)}
@@ -3534,7 +3866,10 @@ export const UnifiedReaderView: React.FC = () => {
                             if (sel) handleWordLookup(sel, text);
                           }}
                           className={`leading-relaxed ${
-                            !paraRtl && idx === 0 && currentPageIndex === 0
+                            !paraRtl &&
+                            idx === 0 &&
+                            currentPageIndex === 0 &&
+                            sliceStartOffset === 0
                               ? 'first-letter:font-display first-letter:text-4xl first-letter:font-semibold first-letter:float-left first-letter:mr-3 first-letter:leading-none'
                               : ''
                           } ${
@@ -3543,7 +3878,7 @@ export const UnifiedReaderView: React.FC = () => {
                               : ''
                           } ${isTtsBarOpen ? 'cursor-pointer hover:bg-amber-500/5 rounded' : ''}`}
                         >
-                          {renderParagraphContent(text, paraIndex)}
+                          {renderParagraphContent(text, paraIndex, sliceStartOffset)}
                         </p>
                       );
                     })}
@@ -3577,35 +3912,12 @@ export const UnifiedReaderView: React.FC = () => {
           ))}
       </div>
 
-      {/* Bottom Kindle-Style Location Telemetry & Page Flip Scrubber (With Mobile Thumb-Zone Back & Safe Area) */}
-      {activeBookMeta.format !== 'pdf' && (
+      {/* Bottom Kindle-Style Location Telemetry & Page Flip Scrubber (Hidden in Zen Mode, Zero Duplicate Buttons) */}
+      {activeBookMeta.format !== 'pdf' && !isZenMode && (
         <footer
           className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
         >
           <div className={`flex flex-wrap items-center gap-1.5 sm:gap-3 ${palette.textMuted}`}>
-            {/* Thumb-Zone Quick Library Back & Options Buttons on Phones */}
-            <button
-              type="button"
-              onClick={closeActiveBook}
-              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
-              title="Back to Library"
-            >
-              <ArrowLeft className="w-3 h-3 text-amber-500" />
-              <span>Library</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setActiveDrawer(activeDrawer === 'typography' ? 'none' : 'typography')
-              }
-              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
-              title="Typography & Display Options"
-            >
-              <Sliders className="w-3 h-3 text-amber-500" />
-              <span>Aa</span>
-            </button>
-
             <span>
               Loc <strong>{activeLocationNumber}</strong>/
               <strong>{activeBookMeta.totalLocations}</strong>

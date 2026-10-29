@@ -287,11 +287,11 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
   onOpenTypographyDrawer,
 }) => {
   const settings = useLuminaStore((s) => s.settings);
+  const isZenMode = useLuminaStore((s) => s.isZenMode);
   const highlights = useLuminaStore((s) => s.highlights);
   const activeBookContent = useLuminaStore((s) => s.activeBookContent);
   const activeJumpTarget = useLuminaStore((s) => s.activeJumpTarget);
   const setActiveJumpTarget = useLuminaStore((s) => s.setActiveJumpTarget);
-  const closeActiveBook = useLuminaStore((s) => s.closeActiveBook);
   const updateActiveLocator = useLuminaStore((s) => s.updateActiveLocator);
   const updateBookTotalLocations = useLuminaStore((s) => s.updateBookTotalLocations);
   const updateSettings = useLuminaStore((s) => s.updateSettings);
@@ -2067,173 +2067,133 @@ export const VirtualizedPdfEngine: React.FC<VirtualizedPdfEngineProps> = ({
         </div>
       )}
 
-      {/* Unified Bottom Page Scrubber, Ink/Crop/Filter Controls & Zoom Footer */}
-      <footer
-        className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
-      >
-        <div className={`flex flex-wrap items-center gap-1.5 sm:gap-2.5 ${palette.textMuted}`}>
-          <button
-            type="button"
-            onClick={closeActiveBook}
-            className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
-            title="Back to Library"
-          >
-            <ArrowLeft className="w-3 h-3 text-amber-500" />
-            <span>Library</span>
-          </button>
-
-          {onOpenTypographyDrawer && (
-            <button
-              type="button"
-              onClick={onOpenTypographyDrawer}
-              className={`sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold cursor-pointer ${palette.elevatedBg} ${palette.borderHairline} ${palette.textPrimary}`}
-              title="Typography & Display Options"
-            >
-              <Sliders className="w-3 h-3 text-amber-500" />
-              <span>Aa</span>
-            </button>
-          )}
-
-          <span>
-            Page{' '}
-            <strong>
-              {isSpreadActive && currentPage < totalPages
-                ? `${currentPage}–${currentPage + 1}`
-                : currentPage}
-            </strong>{' '}
-            of <strong>{totalPages}</strong>
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>{Math.round((currentPage / Math.max(1, totalPages)) * 100)}%</span>
-
-          {/* Page Grid, Auto-Crop, Smart Theme Filter & Freehand Ink Toggles */}
-          <div className="flex items-center gap-1 ml-1 border-l border-current/15 pl-2">
-            <button
-              type="button"
-              onClick={() => setIsPageGridOpen(true)}
-              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${palette.surfaceBg} ${palette.textSecondary}`}
-              title="Page Thumbnail Grid"
-            >
-              <LayoutGrid className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setIsInkMode((v) => !v)}
-              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
-                isInkMode
-                  ? `${palette.accentBg} text-white`
-                  : `${palette.surfaceBg} ${palette.textSecondary}`
-              }`}
-              title="Freehand Stylus / Apple Pencil Ink Annotation"
-            >
-              <PenTool className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                updateSettings({ pdfAutoCropMargins: !settings.pdfAutoCropMargins })
-              }
-              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
-                settings.pdfAutoCropMargins
-                  ? `${palette.accentBg} text-white`
-                  : `${palette.surfaceBg} ${palette.textSecondary}`
-              }`}
-              title="Trim PDF Margin Whitespace"
-            >
-              <Crop className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => updateSettings({ pdfThemeFilter: !settings.pdfThemeFilter })}
-              className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
-                settings.pdfThemeFilter
-                  ? `${palette.accentBg} text-white`
-                  : `${palette.surfaceBg} ${palette.textSecondary}`
-              }`}
-              title="Smart Sepia / Dark Theme Canvas Filter"
-            >
-              <Moon className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const nextSpread = !isSpreadRequested;
-                void updateSettings({
-                  pdfSpreadMode: nextSpread ? 'spread' : 'single',
-                  layoutMode: nextSpread ? 'double' : 'single',
-                });
-              }}
-              className={`inline-flex min-h-[36px] items-center gap-1 px-2 py-1.5 rounded-md cursor-pointer ${
-                isSpreadRequested
-                  ? `${palette.accentBg} text-white font-semibold`
-                  : `${palette.surfaceBg} ${palette.textSecondary}`
-              }`}
-              title="Toggle 2-Page Side-by-Side PDF Book Spread"
-            >
-              <Columns className="w-3.5 h-3.5" />
-              <span className="text-[11px]">2-Page</span>
-            </button>
-          </div>
-
-          <div className="hidden md:flex items-center gap-1 ml-1 border-l border-current/15 pl-2">
-            <button
-              type="button"
-              onClick={() => setScale((s) => Math.max(0.65, +(s - 0.15).toFixed(2)))}
-              className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-              title="Zoom Out"
-            >
-              <ZoomOut className="w-3.5 h-3.5" />
-            </button>
-            <span className="w-10 text-center font-mono-reader text-[11px]">
-              {Math.round(scale * 100)}%
+      {/* Unified Bottom Page Scrubber, Ink/Crop/Filter Controls & Zoom Footer (Hidden in Zen Mode, Zero Duplicate Buttons) */}
+      {!isZenMode && (
+        <footer
+          className={`z-20 px-3 sm:px-6 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom,0px))] border-t flex flex-wrap items-center justify-between gap-2 sm:gap-4 text-[11px] sm:text-xs tabular-nums shrink-0 ${palette.canvasBg} ${palette.borderHairline}`}
+        >
+          <div className={`flex flex-wrap items-center gap-1.5 sm:gap-2.5 ${palette.textMuted}`}>
+            <span>
+              Page{' '}
+              <strong>
+                {isSpreadActive && currentPage < totalPages
+                  ? `${currentPage}–${currentPage + 1}`
+                  : currentPage}
+              </strong>{' '}
+              of <strong>{totalPages}</strong>
             </span>
+            <span aria-hidden="true">·</span>
+            <span>{Math.round((currentPage / Math.max(1, totalPages)) * 100)}%</span>
+
+            {/* Page Grid, Auto-Crop, Smart Theme Filter & Freehand Ink Toggles */}
+            <div className="flex items-center gap-1 ml-1 border-l border-current/15 pl-2">
+              <button
+                type="button"
+                onClick={() => setIsPageGridOpen(true)}
+                className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${palette.surfaceBg} ${palette.textSecondary}`}
+                title="Page Thumbnail Grid"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsInkMode((v) => !v)}
+                className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
+                  isInkMode
+                    ? `${palette.accentBg} text-white`
+                    : `${palette.surfaceBg} ${palette.textSecondary}`
+                }`}
+                title="Freehand Stylus / Apple Pencil Ink Annotation"
+              >
+                <PenTool className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  updateSettings({ pdfAutoCropMargins: !settings.pdfAutoCropMargins })
+                }
+                className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
+                  settings.pdfAutoCropMargins
+                    ? `${palette.accentBg} text-white`
+                    : `${palette.surfaceBg} ${palette.textSecondary}`
+                }`}
+                title="Trim PDF Margin Whitespace"
+              >
+                <Crop className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => updateSettings({ pdfThemeFilter: !settings.pdfThemeFilter })}
+                className={`min-h-[36px] min-w-[36px] inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer ${
+                  settings.pdfThemeFilter
+                    ? `${palette.accentBg} text-white`
+                    : `${palette.surfaceBg} ${palette.textSecondary}`
+                }`}
+                title="Smart Sepia / Dark Theme Canvas Filter"
+              >
+                <Moon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="hidden md:flex items-center gap-1 ml-1 border-l border-current/15 pl-2">
+              <button
+                type="button"
+                onClick={() => setScale((s) => Math.max(0.65, +(s - 0.15).toFixed(2)))}
+                className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                title="Zoom Out"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <span className="w-10 text-center font-mono-reader text-[11px]">
+                {Math.round(scale * 100)}%
+              </span>
+              <button
+                type="button"
+                onClick={() => setScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
+                className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                title="Zoom In"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto">
             <button
               type="button"
-              onClick={() => setScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
-              className="p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-              title="Zoom In"
+              disabled={currentPage <= 1}
+              onClick={() => goToPage(currentPage - (isSpreadActive ? 2 : 1))}
+              className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
             >
-              <ZoomIn className="w-3.5 h-3.5" />
+              <ChevronLeft className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Prev</span>
+            </button>
+
+            <input
+              type="range"
+              aria-label="Page Scrubber"
+              min={1}
+              max={Math.max(1, totalPages)}
+              value={currentPage}
+              onChange={(e) => goToPage(Number(e.target.value))}
+              className="w-24 sm:w-40 accent-amber-600"
+            />
+
+            <button
+              type="button"
+              disabled={currentPage >= totalPages}
+              onClick={() => goToPage(currentPage + (isSpreadActive ? 2 : 1))}
+              className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
+            >
+              <span className="hidden sm:inline">Next</span>
+              <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
-        </div>
-
-        <div className="flex items-center gap-2 ml-auto">
-          <button
-            type="button"
-            disabled={currentPage <= 1}
-            onClick={() => goToPage(currentPage - (isSpreadActive ? 2 : 1))}
-            className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Prev</span>
-          </button>
-
-          <input
-            type="range"
-            aria-label="Page Scrubber"
-            min={1}
-            max={Math.max(1, totalPages)}
-            value={currentPage}
-            onChange={(e) => goToPage(Number(e.target.value))}
-            className="w-24 sm:w-40 accent-amber-600"
-          />
-
-          <button
-            type="button"
-            disabled={currentPage >= totalPages}
-            onClick={() => goToPage(currentPage + (isSpreadActive ? 2 : 1))}
-            className={`min-h-[36px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border cursor-pointer disabled:opacity-30 ${palette.borderHairline}`}
-          >
-            <span className="hidden sm:inline">Next</span>
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </footer>
+        </footer>
+      )}
     </div>
   );
 };

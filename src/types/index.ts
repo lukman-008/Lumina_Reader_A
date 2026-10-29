@@ -143,6 +143,8 @@ export interface Highlight {
   chapterTitle?: string;
   pageIndex?: number;
   paragraphIndex?: number;
+  startOffset?: number;
+  endOffset?: number;
   locationNumber: number;
   selectedText: string;
   color: HighlightColor;
